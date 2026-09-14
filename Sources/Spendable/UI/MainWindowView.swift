@@ -5,11 +5,11 @@ import SwiftUI
 /// Observes exactly one narrow query (active accounts) for as long as the window is open.
 struct MainWindowView: View {
     let model: AppModel
+    @Bindable var state: MainWindowState
 
     @State private var accounts: [Account] = []
     @State private var observationError: String?
     @State private var editing: Account?
-    @State private var addingAccount = false
 
     var body: some View {
         Group {
@@ -23,18 +23,7 @@ struct MainWindowView: View {
                 accountList
             }
         }
-        .frame(minWidth: 520, minHeight: 360)
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    addingAccount = true
-                } label: {
-                    Label("Add an account by hand", systemImage: "plus")
-                }
-                .disabled(model.database == nil)
-            }
-        }
-        .sheet(isPresented: $addingAccount) {
+        .sheet(isPresented: $state.addingAccount) {
             if let database = model.database {
                 ManualAccountForm(database: database, existing: nil)
             }
@@ -55,7 +44,7 @@ struct MainWindowView: View {
         } description: {
             Text("Add an account by hand to start. Connecting your bank through SimpleFIN comes in a later step.")
         } actions: {
-            Button("Add an account by hand") { addingAccount = true }
+            Button("Add an account by hand") { state.addingAccount = true }
                 .buttonStyle(.borderedProminent)
         }
     }
