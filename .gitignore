@@ -1,0 +1,61 @@
+# ── Xcode / build products ─────────────────────────────────────────────
+DerivedData/
+build/
+.build/
+.swiftpm/
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xcresult
+*.hmap
+*.ipa
+*.dSYM
+*.dSYM.zip
+
+# The Xcode project is generated from project.yml by scripts/bootstrap.sh
+*.xcodeproj/
+*.xcworkspace/
+
+# ── Profiling and crash artifacts (contain memory contents and decoded URLs)
+*.trace
+*.memgraph
+*.ips
+*.crash
+*.diag
+*.hang
+*.spin
+*.log
+*.out
+*.err
+
+# ── Databases: never, under any name ────────────────────────────────────
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.db
+*.db-wal
+*.db-shm
+
+# ── Secrets and local configuration ─────────────────────────────────────
+.env
+.env.*
+secrets/
+local/
+*.token
+*.p12
+*.cer
+*.pem
+*.key
+*.mobileprovision
+*.provisionprofile
+.claude/settings.local.json
+
+# ── OS / editor noise ───────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+._*
+*.swp
+*~
+.idea/
+.vscode/

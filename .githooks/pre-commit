@@ -1,0 +1,73 @@
+#!/bin/sh
+# Refuses to commit anything that looks like a credential or a money-bearing
+# artifact. This repo is about the owner's bank accounts; the SimpleFIN access
+# URL embeds live credentials and git history never forgets.
+#
+# Bypassing this hook (--no-verify, git add -f) is not allowed. See CLAUDE.md.
+#
+# The bracketed characters inside some patterns below are deliberate: they keep
+# this file from matching its own regular expressions.
+
+set -u
+LC_ALL=C
+export LC_ALL
+
+status=0
+
+blocked_ext='\.(sqlite|sqlite-wal|sqlite-shm|sqlite-journal|db|db-wal|db-shm|p12|cer|pem|key|mobileprovision|provisionprofile|token|trace|memgraph|ips|crash|diag|hang|spin|xcresult|log)$'
+blocked_path='(^|/)(secrets|local)/|(^|/)\.env(\.|$)|(^|/)xcuserdata/|(^|/)DerivedData/'
+
+# A URL of the shape scheme://user:password@host — an access URL. Only the public demo is allowed.
+userinfo_url='https?://[^/[:space:]"'"'"'<>]+:[^/[:space:]@"'"'"'<>]+@'
+allow_userinfo='demo:demo@(beta-)?bridge\.simplefin\.org'
+
+# base64 of "https://" or "http://" — the shape of a SimpleFIN setup token.
+b64_url='aHR0cHM6L[y]|aHR0cDov[L]'
+
+# A literal HTTP Basic credential.
+basic_auth='Basic [A-Za-z0-9+/=]{20,}'
+
+# GitHub tokens, in case one is ever pasted anywhere.
+gh_token='(ghp_|github_pat_|gho_)[A-Za-z0-9_]{10,}'
+
+files=$(git diff --cached --name-only --diff-filter=ACMR)
+[ -z "$files" ] && exit 0
+
+for f in $files; do
+  if printf '%s\n' "$f" | grep -Eiq "$blocked_ext"; then
+    echo "pre-commit: blocked file type: $f" >&2
+    status=1
+    continue
+  fi
+  if printf '%s\n' "$f" | grep -Eq "$blocked_path"; then
+    echo "pre-commit: blocked path: $f" >&2
+    status=1
+    continue
+  fi
+
+  content=$(git show ":$f" 2>/dev/null) || continue
+
+  hits=$(printf '%s\n' "$content" | grep -nE "$userinfo_url" | grep -Ev "$allow_userinfo")
+  if [ -n "$hits" ]; then
+    echo "pre-commit: URL with embedded credentials in $f (line numbers):" >&2
+    printf '%s\n' "$hits" | cut -d: -f1 | head -5 | sed 's/^/   line /' >&2
+    status=1
+  fi
+  if printf '%s\n' "$content" | grep -qE "$b64_url"; then
+    echo "pre-commit: base64-encoded URL (a setup token?) in $f" >&2
+    status=1
+  fi
+  if printf '%s\n' "$content" | grep -qE "$basic_auth"; then
+    echo "pre-commit: literal Basic-auth credential in $f" >&2
+    status=1
+  fi
+  if printf '%s\n' "$content" | grep -qE "$gh_token"; then
+    echo "pre-commit: GitHub token in $f" >&2
+    status=1
+  fi
+done
+
+if [ "$status" -ne 0 ]; then
+  echo "pre-commit: refusing to commit. Remove the secret from the file; if it was real, disable it on the SimpleFIN website and generate a new one. Never use --no-verify." >&2
+fi
+exit "$status"
