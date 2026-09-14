@@ -10,6 +10,7 @@ import os
 @Observable
 final class AppModel {
     private(set) var database: AppDatabase?
+    private(set) var store: SpendableStore?
     private(set) var startupError: String?
     let credentialStore: any CredentialStore
 
@@ -24,6 +25,7 @@ final class AppModel {
     init(database: AppDatabase, credentialStore: any CredentialStore = InMemoryCredentialStore()) {
         self.database = database
         self.credentialStore = credentialStore
+        self.store = SpendableStore(database: database)
         self.started = true
     }
 
@@ -42,6 +44,7 @@ final class AppModel {
                 switch opened {
                 case .success(let database):
                     self.database = database
+                    self.store = SpendableStore(database: database)
                     Self.log.info("database ready")
                 case .failure(let error):
                     // Error descriptions here carry a path at most, never data.
