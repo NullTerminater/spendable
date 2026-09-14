@@ -22,6 +22,12 @@ Filled in at each milestone from the scripts in `scripts/` (Debug build, this Ma
 | Milestone | Warm launch (3rd of 3) | First launch after build | Idle footprint (bar only) | With window open | After window closed | Leaks after 5 open/close cycles | Idle CPU |
 |-----------|------------------------|--------------------------|---------------------------|------------------|---------------------|---------------------------------|----------|
 | 1 (v0.1-skeleton) | 200 ms (runs: 147, 200) | 201 ms | 14.3 MB | 21.7–22.4 MB | 21.7–22.3 MB | 0 leaks, 0 bytes | 0.0 %, 10 ms of CPU time over 10 s idle |
+| 2 (v0.2-engine) | 153 ms (runs: 159, 153) | 400 ms | 14.5 MB | 26.0–26.9 MB | 25.9–26.7 MB | 0 leaks, 0 bytes | unchanged |
+
+Working out both figures takes **4.3 ms** (slowest of 500 runs: 4.7 ms) on 40 accounts and 120 bills
+— several times more of each than the app will ever really hold, and with weekly bills, which are
+the worst case for expanding occurrences. It runs when the data changes or the day rolls over, not
+on a timer.
 
 Notes on milestone 1: after the window closes, a heap dump contains no window, hosting or view objects of ours, so the view hierarchy is released; the ~8 MB that stays resident is AppKit and SwiftUI framework caches from the first window, and it does not grow across cycles (cycles 2 and 3 are within 1 MB of each other). The database with only the schema is 4 KB plus a 119 KB WAL file. The main window's SwiftUI content is hosted inside a plain container view on purpose: as the window's content view, `NSHostingView` resizes the window to the content's ideal size after every layout on macOS 26, which shrank the window and undid the user's resizing.
 
@@ -33,6 +39,8 @@ open Spendable.xcodeproj        # Run the Spendable scheme
 ```
 
 Milestone 1: a coin icon appears in the menu bar. Open Spendable from it, add an account by hand (name, kind, balance), quit and reopen, and it is still there. Edit an account by double-clicking it. Nothing is calculated yet.
+
+Milestone 2: the window has three screens. **Accounts** is milestone 1, plus a tick box on savings to count it. **Bills** is where you add your rent and anything that comes out automatically, with a monthly total at the top and an "I've paid this" action on each row. **What you can spend** is the answer: a number, and under "How is this worked out?" the whole sum in sentences. Set a payday and a second figure appears, covering only the days until you are next paid, with the bills that fall after it named rather than hidden. `docs/ENGINE.md` is the contract every one of those rules follows.
 
 To reproduce the numbers above without touching your real data:
 
