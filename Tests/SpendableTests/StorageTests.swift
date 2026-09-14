@@ -33,7 +33,47 @@ struct StorageTests {
         #expect(foreignKeys == 1)
 
         let applied = try db.reader.read { db in try AppDatabase.migrator.appliedIdentifiers(db) }
-        #expect(applied == ["v1"])
+        #expect(applied == ["v1", "v2-recurring-anchor-destination-and-paid"])
+    }
+
+    @Test("a database already at v1 upgrades to v2 keeping its rows, and the new columns work")
+    func upgradesFromV1WithRows() throws {
+        // Milestone 1 is tagged and the owner may already have accounts and a database at v1.
+        let queue = try DatabaseQueue()
+        var v1Only = DatabaseMigrator()
+        v1Only.registerMigration("v1") { db in try db.execute(sql: AppDatabase.schemaV1) }
+        try v1Only.migrate(queue)
+
+        let accountId = try queue.write { db -> Int64 in
+            var account = Account.manual(displayName: "Chase Checking", type: .checking, balanceCents: 124_000)
+            try account.insert(db)
+            try db.execute(sql: """
+                INSERT INTO recurring_charge (source, kind, name, amount_cents, cadence, next_expected_date, status, created_at, updated_at)
+                VALUES ('manual', 'bill', 'Rent', 50000, 'monthly', 1790000000, 'confirmed', 0, 0)
+                """)
+            return account.id!
+        }
+
+        try AppDatabase.migrator.migrate(queue)
+
+        let applied = try queue.read { db in try AppDatabase.migrator.appliedIdentifiers(db) }
+        #expect(applied == ["v1", "v2-recurring-anchor-destination-and-paid"])
+
+        let charge = try #require(try queue.read { db in try RecurringCharge.fetchOne(db) })
+        #expect(charge.name == "Rent")
+        #expect(charge.amountCents == 50_000)
+        // The existing row's anchor is backfilled from its marker, so it keeps its day of the month.
+        #expect(charge.anchorDate == 1_790_000_000)
+        #expect(charge.destinationAccountId == nil)
+        #expect(try queue.read { db in try Account.fetchCount(db) } == 1)
+
+        // The added foreign key really is enforced: deleting the destination clears the reference.
+        try queue.write { db in
+            try db.execute(sql: "UPDATE recurring_charge SET destination_account_id = ?", arguments: [accountId])
+            try db.execute(sql: "DELETE FROM account WHERE id = ?", arguments: [accountId])
+        }
+        let after = try #require(try queue.read { db in try RecurringCharge.fetchOne(db) })
+        #expect(after.destinationAccountId == nil)
     }
 
     @Test("a manual account round-trips through the database unchanged")
