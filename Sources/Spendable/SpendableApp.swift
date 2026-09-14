@@ -7,16 +7,6 @@ import SwiftUI
 struct SpendableApp: App {
     @State private var model = AppModel()
 
-    init() {
-        #if DEBUG
-        // Milestone 1 feasibility spike: proves the App Group container and the login keychain
-        // work under the free Personal Team signature without any prompt. Removed before v0.1.
-        if !ProcessInfo.processInfo.isRunningTests {
-            Spike.run()
-        }
-        #endif
-    }
-
     var body: some Scene {
         MenuBarExtra {
             Button("Open Spendable") {
