@@ -42,6 +42,29 @@ final class AppDatabase: Sendable {
         migrator.registerMigration("v1") { db in
             try db.execute(sql: schemaV1)
         }
+        migrator.registerMigration("v2-recurring-anchor-destination-and-paid") { db in
+            // anchor_date: the charge's first occurrence, which every later occurrence is measured
+            // from. Without it, advancing next_expected_date one step at a time lets a bill due on
+            // the 31st land on the 28th in February and stay there for good.
+            try db.execute(sql: "ALTER TABLE recurring_charge ADD COLUMN anchor_date INTEGER")
+            // destination_account_id: where a transfer goes. Whether a transfer leaves the money
+            // the owner can spend depends entirely on which account receives it.
+            try db.execute(sql: """
+                ALTER TABLE recurring_charge
+                ADD COLUMN destination_account_id INTEGER REFERENCES account(id) ON DELETE SET NULL
+                """)
+            // last_marked_paid_at / paid_reflected_in_balance: when the owner says they have paid a
+            // bill but has not yet updated the balance it came out of, the money is gone from the
+            // account and not yet gone from the number. Keeping the bill subtracted until the
+            // balance catches up is the only way the figure does not jump up by the bill's amount.
+            // Its own column, never updated_at, which a rename would also touch.
+            try db.execute(sql: "ALTER TABLE recurring_charge ADD COLUMN last_marked_paid_at INTEGER")
+            try db.execute(sql: """
+                ALTER TABLE recurring_charge
+                ADD COLUMN paid_reflected_in_balance INTEGER NOT NULL DEFAULT 1
+                """)
+            try db.execute(sql: "UPDATE recurring_charge SET anchor_date = next_expected_date WHERE anchor_date IS NULL")
+        }
         return migrator
     }
 
