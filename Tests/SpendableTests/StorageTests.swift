@@ -33,31 +33,42 @@ struct StorageTests {
         #expect(foreignKeys == 1)
 
         let applied = try db.reader.read { db in try AppDatabase.migrator.appliedIdentifiers(db) }
-        #expect(applied == ["v1", "v2-recurring-anchor-destination-and-paid"])
+        #expect(applied == Set(AppDatabase.allMigrations))
     }
 
-    @Test("a database already at v1 upgrades to v2 keeping its rows, and the new columns work")
+    @Test("a database already at v1 upgrades keeping its rows, and the new columns work")
     func upgradesFromV1WithRows() throws {
-        // Milestone 1 is tagged and the owner may already have accounts and a database at v1.
+        // Milestone 1 is tagged and the owner may already have accounts in a database at v1.
         let queue = try DatabaseQueue()
         var v1Only = DatabaseMigrator()
         v1Only.registerMigration("v1") { db in try db.execute(sql: AppDatabase.schemaV1) }
         try v1Only.migrate(queue)
 
+        // Written as raw SQL with only the columns v1 had, which is the whole point of the test:
+        // the record type has since grown columns that did not exist when this row was saved.
         let accountId = try queue.write { db -> Int64 in
-            var account = Account.manual(displayName: "Chase Checking", type: .checking, balanceCents: 124_000)
-            try account.insert(db)
+            try db.execute(sql: """
+                INSERT INTO account (source, display_name, user_type, currency, balance_cents, balance_date, created_at)
+                VALUES ('manual', 'Chase Checking', 'checking', 'USD', 124000, 1789000000, 1789000000)
+                """)
             try db.execute(sql: """
                 INSERT INTO recurring_charge (source, kind, name, amount_cents, cadence, next_expected_date, status, created_at, updated_at)
                 VALUES ('manual', 'bill', 'Rent', 50000, 'monthly', 1790000000, 'confirmed', 0, 0)
                 """)
-            return account.id!
+            return db.lastInsertedRowID
         }
 
         try AppDatabase.migrator.migrate(queue)
 
         let applied = try queue.read { db in try AppDatabase.migrator.appliedIdentifiers(db) }
-        #expect(applied == ["v1", "v2-recurring-anchor-destination-and-paid"])
+        #expect(applied == Set(AppDatabase.allMigrations))
+
+        // The columns the later milestones added arrive with sane defaults on the existing row.
+        let account = try #require(try queue.read { db in try Account.fetchOne(db) })
+        #expect(account.displayName == "Chase Checking")
+        #expect(account.balanceCents == 124_000)
+        #expect(account.holdingsCount == 0)
+        #expect(account.notUpdatingSince == nil)
 
         let charge = try #require(try queue.read { db in try RecurringCharge.fetchOne(db) })
         #expect(charge.name == "Rent")

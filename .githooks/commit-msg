@@ -1,0 +1,46 @@
+#!/bin/sh
+# A commit message is as public as a file. The pre-commit hook scans staged content; this scans
+# what gets written about it, because pasting a failing URL into a message is exactly what someone
+# does at the moment a real-token sync goes wrong.
+#
+# Same patterns as .githooks/pre-commit. The bracketed characters keep this file from matching its
+# own regular expressions.
+
+set -u
+LC_ALL=C
+export LC_ALL
+
+message_file=$1
+[ -f "$message_file" ] || exit 0
+
+# Comment lines are stripped before the message is stored, so they are not scanned.
+body=$(grep -v '^#' "$message_file")
+status=0
+
+userinfo_url='https?://[^/[:space:]"'"'"'<>]+:[^/[:space:]@"'"'"'<>]+@'
+allow_userinfo='demo:demo@(beta-)?bridge\.simplefin\.org'
+b64_url='aHR0cHM6L[y]|aHR0cDov[L]'
+basic_auth='Basic [A-Za-z0-9+/=]{20,}'
+gh_token='(ghp_|github_pat_|gho_)[A-Za-z0-9_]{10,}'
+
+if printf '%s\n' "$body" | grep -Eo "$userinfo_url" | grep -Evq "$allow_userinfo"; then
+  echo "commit-msg: the message contains a URL with credentials in it" >&2
+  status=1
+fi
+if printf '%s\n' "$body" | grep -qE "$b64_url"; then
+  echo "commit-msg: the message contains a base64-encoded URL, which is the shape of a setup token" >&2
+  status=1
+fi
+if printf '%s\n' "$body" | grep -qE "$basic_auth"; then
+  echo "commit-msg: the message contains a literal Basic credential" >&2
+  status=1
+fi
+if printf '%s\n' "$body" | grep -qE "$gh_token"; then
+  echo "commit-msg: the message contains a GitHub token" >&2
+  status=1
+fi
+
+if [ "$status" -ne 0 ]; then
+  echo "commit-msg: refusing this message. Describe what happened without quoting the value." >&2
+fi
+exit "$status"

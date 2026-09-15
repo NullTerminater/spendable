@@ -11,7 +11,7 @@ if [ "$(git rev-parse --show-toplevel)" != "$root" ]; then
 fi
 
 git config core.hooksPath .githooks
-chmod +x .githooks/pre-commit
+chmod +x .githooks/pre-commit .githooks/commit-msg
 
 if ! command -v xcodegen >/dev/null 2>&1; then
   echo "bootstrap: xcodegen not found. Install with: brew install xcodegen" >&2

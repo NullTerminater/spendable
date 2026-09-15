@@ -23,6 +23,12 @@ Filled in at each milestone from the scripts in `scripts/` (Debug build, this Ma
 |-----------|------------------------|--------------------------|---------------------------|------------------|---------------------|---------------------------------|----------|
 | 1 (v0.1-skeleton) | 200 ms (runs: 147, 200) | 201 ms | 14.3 MB | 21.7–22.4 MB | 21.7–22.3 MB | 0 leaks, 0 bytes | 0.0 %, 10 ms of CPU time over 10 s idle |
 | 2 (v0.2-engine) | 153 ms (runs: 159, 153) | 400 ms | 14.5 MB | 26.0–26.9 MB | 25.9–26.7 MB | 0 leaks, 0 bytes | unchanged |
+| 3 (v0.3-simplefin) | 161 ms (runs: 193, 161) | 174 ms | 14.8 MB | 26.4–27.2 MB | 26.3–27.0 MB | 0 leaks, 0 bytes | unchanged |
+
+Storing a year of transactions — 5,984 rows across four accounts in eleven windows, through the real
+ingestion path — grows the live heap by **229 KB**. That is the number that matters: a version
+holding a year in memory would grow by several megabytes. Physical footprint moves by about 1 MB and
+is reported rather than asserted, because freed pages stay resident and never come back down.
 
 Working out both figures takes **4.3 ms** (slowest of 500 runs: 4.7 ms) on 40 accounts and 120 bills
 — several times more of each than the app will ever really hold, and with weekly bills, which are
@@ -39,6 +45,24 @@ open Spendable.xcodeproj        # Run the Spendable scheme
 ```
 
 Milestone 1: a coin icon appears in the menu bar. Open Spendable from it, add an account by hand (name, kind, balance), quit and reopen, and it is still there. Edit an account by double-clicking it. Nothing is calculated yet.
+
+Milestone 3 is the bank connection, and has no screen of its own yet — milestone 4 adds the setup
+screen where a real token is pasted. To watch the whole path run against SimpleFIN's public demo,
+which claims a fresh single-use token, stores it under a **separate** keychain item from any real
+connection, and syncs:
+
+```bash
+SPENDABLE_DEBUG_CONTAINER=/tmp/spendable-demo scripts/../DerivedData/Build/Products/Debug/Spendable.app/Contents/MacOS/Spendable
+```
+
+or, the way the milestone was checked:
+
+```bash
+open --env SPENDABLE_DEBUG_CONTAINER=/tmp/spendable-demo --env SPENDABLE_DEBUG_CONNECT_DEMO=1 DerivedData/Build/Products/Debug/Spendable.app
+```
+
+It writes what it did to `measurements.log` in that container. `docs/SYNC.md` is the contract every
+rule follows.
 
 Milestone 2: the window has three screens. **Accounts** is milestone 1, plus a tick box on savings to count it. **Bills** is where you add your rent and anything that comes out automatically, with a monthly total at the top and an "I've paid this" action on each row. **What you can spend** is the answer: a number, and under "How is this worked out?" the whole sum in sentences. Set a payday and a second figure appears, covering only the days until you are next paid, with the bills that fall after it named rather than hidden. `docs/ENGINE.md` is the contract every one of those rules follows.
 
