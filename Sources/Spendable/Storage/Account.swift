@@ -71,6 +71,12 @@ struct Account: Codable, Sendable, Identifiable, Equatable, FetchableRecord, Mut
     var ccStatementCents: Int64?
     var ccStatementEnteredAt: Int64?
     var ccHasCreditBalance: Bool
+    /// How many holdings the bank reports. Anything above zero means the balance is a market value
+    /// rather than money, which is the only signal SimpleFIN gives that an account is investments.
+    var holdingsCount: Int
+    /// When this account stopped updating: it vanished from an otherwise good sync, or the server
+    /// said something was wrong with it. Set the moment it happens, not after its balance ages.
+    var notUpdatingSince: Int64?
     var createdAt: Int64
 
     mutating func didInsert(_ inserted: InsertionSuccess) {
@@ -113,6 +119,8 @@ struct Account: Codable, Sendable, Identifiable, Equatable, FetchableRecord, Mut
             ccStatementCents: nil,
             ccStatementEnteredAt: nil,
             ccHasCreditBalance: false,
+            holdingsCount: 0,
+            notUpdatingSince: nil,
             createdAt: seconds)
     }
 }
