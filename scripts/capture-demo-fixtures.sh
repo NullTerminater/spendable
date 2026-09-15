@@ -26,7 +26,9 @@ case "$CLAIM" in
   https://*) ;;
   *) echo "capture: the token did not decode to an https URL" >&2; exit 1 ;;
 esac
-echo "Claiming $CLAIM"
+# The claim URL is not printed and not passed as an argument: argv is visible in `ps` to every
+# process on this Mac, and a terminal's scrollback outlives the command.
+echo "Claiming a fresh demo token..."
 
 ACCESS=$(curl -s --max-time 20 -H "Content-Length: 0" -X POST "$CLAIM")
 case "$ACCESS" in
