@@ -37,6 +37,14 @@ final class AppDatabase: Sendable {
         return config
     }
 
+    /// Every migration, in order. Forward-only: a shipped one is never edited, because editing it
+    /// is a silent no-op on a database that has already applied it.
+    static let allMigrations = [
+        "v1",
+        "v2-recurring-anchor-destination-and-paid",
+        "v3-sync-bookkeeping",
+    ]
+
     static var migrator: DatabaseMigrator {
         var migrator = DatabaseMigrator()
         migrator.registerMigration("v1") { db in
@@ -64,6 +72,19 @@ final class AppDatabase: Sendable {
                 ADD COLUMN paid_reflected_in_balance INTEGER NOT NULL DEFAULT 1
                 """)
             try db.execute(sql: "UPDATE recurring_charge SET anchor_date = next_expected_date WHERE anchor_date IS NULL")
+        }
+        migrator.registerMigration("v3-sync-bookkeeping") { db in
+            // holdings_count: SimpleFIN carries no account type, and holdings are the strongest
+            // signal in the whole response that a balance is a market value rather than money. The
+            // demo's savings account holds six figures of Apple stock and is called "SimpleFIN
+            // Savings", so a name-based guess would make it spendable.
+            try db.execute(sql: "ALTER TABLE account ADD COLUMN holdings_count INTEGER NOT NULL DEFAULT 0")
+            // not_updating_since: an account that vanishes from an otherwise successful response is
+            // not updating from that moment, not after a week of its balance ageing. This is the
+            // failure the owner's specification warns about most.
+            try db.execute(sql: "ALTER TABLE account ADD COLUMN not_updating_since INTEGER")
+            // Why a pending row stopped counting, so the reason survives in the history.
+            try db.execute(sql: "ALTER TABLE bank_transaction ADD COLUMN voided_reason TEXT")
         }
         return migrator
     }

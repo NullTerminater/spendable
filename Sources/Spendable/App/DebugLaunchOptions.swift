@@ -29,6 +29,65 @@ enum DebugLaunchOptions {
         if let runs = environment["SPENDABLE_DEBUG_ENGINE_BENCH"].flatMap(Int.init) {
             Task { await benchmarkTheEngine(runs: max(1, runs)) }
         }
+        if environment["SPENDABLE_DEBUG_CONNECT_DEMO"] != nil {
+            Task { await connectToTheDemo(model) }
+        }
+    }
+
+    /// Connects to SimpleFIN's own public demo, so the whole path — claim, store, sync, ingest —
+    /// can be watched running without a real bank or a real token.
+    ///
+    /// It claims a fresh single-use token from SimpleFIN's developer page, exactly as the owner
+    /// would paste one in milestone 4, and stores it under a **different** Keychain account from
+    /// the real connection: Debug and Release share a bundle identifier and a login keychain, and
+    /// one careless write would destroy an access URL that cannot be recovered without making a new
+    /// token by hand.
+    @MainActor
+    private static func connectToTheDemo(_ model: AppModel) async {
+        guard ProcessInfo.processInfo.environment["SPENDABLE_DEBUG_CONTAINER"] != nil else {
+            log.error("demo connect refused: it only runs against a scratch container")
+            DebugMeasurementLog.append("demo connect refused: set SPENDABLE_DEBUG_CONTAINER first")
+            return
+        }
+        guard let database = await waitForDatabase(model) else { return }
+
+        let store = KeychainCredentialStore(account: KeychainCredentialStore.demoAccount)
+        let client = SimpleFINClient()
+
+        do {
+            if try store.load() == nil {
+                let guide = URL(string: "https://beta-bridge.simplefin.org/info/developers")!
+                let (page, _) = try await URLSession(configuration: .ephemeral).data(from: guide)
+                let text = String(decoding: page, as: UTF8.self)
+                guard let token = text.firstMatch(of: try Regex("aHR0[A-Za-z0-9+/=]{40,}"))?.0 else {
+                    DebugMeasurementLog.append("demo connect: no token on the developer page")
+                    return
+                }
+                let claimURL = try SimpleFINClient.claimURL(fromSetupToken: String(token))
+                let credential = try await client.claim(claimURL: claimURL)
+                // Stored and read back before anything else: the token is spent either way.
+                try store.save(credential)
+                DebugMeasurementLog.append("demo connect: claimed and stored")
+            }
+        } catch let failure as SimpleFINFailure {
+            DebugMeasurementLog.append("demo connect failed: \(failure.ownerFacingMessage)")
+            return
+        } catch {
+            DebugMeasurementLog.append("demo connect failed while storing the credential")
+            return
+        }
+
+        let coordinator = SyncCoordinator(database: database, client: client, credentials: store)
+        let report = await coordinator.sync(reason: .firstConnection)
+        let line = "demo sync: \(report.requestsSpent) requests, \(report.windowsFetched) windows, "
+            + "\(report.outcome.accountsInserted) accounts added, \(report.outcome.transactionsInserted) transactions, "
+            + "\(report.outcome.transactionsMatchedByContent) matched by content, "
+            + (report.failure.map { "failure: \($0.ownerFacingMessage)" }
+               ?? report.refusal.map { "refused: \($0.ownerFacingMessage)" }
+               ?? report.credentialProblem
+               ?? "ok")
+        log.notice("\(line, privacy: .public)")
+        DebugMeasurementLog.append(line)
     }
 
     /// Times the figure calculation on a load far past anything real: 40 accounts and 120 bills,

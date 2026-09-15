@@ -314,6 +314,11 @@ enum SafeToSpendEngine {
             standing = .creditCard
         } else if type == .savings && account.includeInSafeToSpend != true {
             standing = .heldOut(.savingsNotCounted)
+        } else if account.notUpdatingSince != nil {
+            // The bank stopped answering for this account. That is known the moment it happens, so
+            // it does not wait for the balance to age out — the failure the specification warns
+            // about most is a healthy-looking app over data that stopped a month ago.
+            standing = .heldOut(.stoppedUpdating)
         } else if daysOld > deadAfterDays {
             standing = .heldOut(.stoppedUpdating)
         } else {
