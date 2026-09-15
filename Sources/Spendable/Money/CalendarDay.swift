@@ -47,6 +47,22 @@ struct CalendarDay: Hashable, Sendable, Codable {
         Int64(startOfDay(in: calendar).timeIntervalSince1970)
     }
 
+    /// Midnight UTC on this date, which is what goes on the wire.
+    ///
+    /// Never local midnight. Local midnight moves by an hour across a daylight-saving change and by
+    /// hours when the owner travels, and a server that keys its answer off the date it was given
+    /// would then return a different set of rows for what is meant to be the same window.
+    var utcMidnight: Int64 {
+        Int64(startOfDay(in: Self.utc).timeIntervalSince1970)
+    }
+
+    /// A UTC calendar, for the values that go on the wire rather than in front of a person.
+    static let utc: Calendar = {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        return calendar
+    }()
+
     /// This day moved by whole days.
     func adding(days: Int, in calendar: Calendar = .current) -> CalendarDay {
         guard days != 0 else { return self }

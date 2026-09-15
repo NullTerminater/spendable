@@ -28,11 +28,41 @@ extension SimpleFINCredential: CustomStringConvertible, CustomDebugStringConvert
     var debugDescription: String { description }
 }
 
+extension SimpleFINCredential: CustomReflectable {
+    /// Both description forms returning "redacted" is not enough on its own: `dump()` and anything
+    /// else built on `Mirror` walk the stored properties directly and print the password verbatim.
+    /// An empty mirror is what actually closes that door.
+    var customMirror: Mirror { Mirror(self, children: [:], displayStyle: .struct) }
+}
+
 enum CredentialStoreError: Error, Equatable {
     /// The item was written but reading it back did not return the same credential.
     case verificationFailed
     case keychain(OSStatus)
     case encoding
+
+    /// macOS refused rather than reported nothing there. The difference matters enormously: a
+    /// locked keychain must never be mistaken for "the bank rejected your connection", which would
+    /// send the owner off to burn a setup token they did not need to burn.
+    var isRefusalRatherThanAbsence: Bool {
+        guard case .keychain(let status) = self else { return false }
+        return status == errSecInteractionNotAllowed || status == errSecAuthFailed
+            || status == errSecUserCanceled || status == errSecNotAvailable
+    }
+
+    var ownerFacingMessage: String {
+        if isRefusalRatherThanAbsence {
+            return "macOS wouldn't let me read your saved connection. Unlock your login keychain and try again."
+        }
+        switch self {
+        case .verificationFailed:
+            return "macOS said it saved your connection, but reading it back gave something different. Nothing has been kept."
+        case .encoding:
+            return "Your saved connection couldn't be read. You'll need to connect again."
+        case .keychain:
+            return "macOS wouldn't let me save the connection."
+        }
+    }
 }
 
 /// Where the SimpleFIN credential lives. The app has exactly one real implementation (Keychain)
@@ -71,10 +101,18 @@ final class InMemoryCredentialStore: CredentialStore {
 /// group would depend on a provisioning profile that expires every seven days.
 final class KeychainCredentialStore: CredentialStore {
     private let service: String
-    private let account = "access"
+    private let account: String
 
-    init(service: String = StorePaths.keychainService) {
+    /// The owner's real connection.
+    static let realAccount = "access"
+    /// Where a Debug build's "connect to the public demo" action writes. Debug and Release share a
+    /// bundle identifier and a login keychain, so without a separate name one demo connection would
+    /// overwrite the owner's real access URL — unrecoverable without hand-making a new token.
+    static let demoAccount = "access-demo"
+
+    init(service: String = StorePaths.keychainService, account: String = KeychainCredentialStore.realAccount) {
         self.service = service
+        self.account = account
     }
 
     private struct Payload: Codable {
