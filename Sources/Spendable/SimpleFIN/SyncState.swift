@@ -46,10 +46,14 @@ enum SyncState {
         try db.execute(
             sql: "INSERT INTO sync_state (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
             arguments: [key, value])
+        // SQLite's update hook does not report WITHOUT ROWID tables. GRDB needs this explicit
+        // notification for progress, connection notices and confirmation expiry to update live.
+        try db.notifyChanges(in: Table("sync_state"))
     }
 
     static func clear(_ db: Database, _ key: String) throws {
         try db.execute(sql: "DELETE FROM sync_state WHERE key = ?", arguments: [key])
+        try db.notifyChanges(in: Table("sync_state"))
     }
 
     /// How long to wait after a run of failures before trying again: half an hour, then an hour,
@@ -79,6 +83,7 @@ enum SyncShape: Equatable, Sendable {
 struct SyncPolicy: Equatable, Sendable {
     /// How old balances may get before a routine refresh is due.
     static let balancesStaleAfter: TimeInterval = 6 * 3_600
+    static let balancesStaleAfterForActivity: TimeInterval = 5 * 3_600
     /// How old the transaction history may get before the next sync pulls it too.
     static let transactionsStaleAfter: TimeInterval = 24 * 3_600
     /// How long after any attempt a non-manual trigger will not try again, so repeated wakes with
@@ -109,6 +114,8 @@ struct SyncPolicy: Equatable, Sendable {
     func decide(trigger: Trigger, now: Date) -> Decision {
         guard isConnected else { return .skip("no bank connected") }
 
+        if serverWarnedAboutTheRate { return .skip("SimpleFIN warned about the rate") }
+
         // The owner asking is different from the app deciding: it only answers to the budget.
         if trigger == .manual {
             guard requestsRemaining > 0 else { return .skip("no requests left today") }
@@ -126,7 +133,8 @@ struct SyncPolicy: Equatable, Sendable {
         }
 
         guard let balancesSyncedAt else { return .sync(shapeNeeded(now: now)) }
-        guard now.timeIntervalSince(balancesSyncedAt) >= Self.balancesStaleAfter else {
+        let dueAfter = trigger == .launch ? Self.balancesStaleAfter : Self.balancesStaleAfterForActivity
+        guard now.timeIntervalSince(balancesSyncedAt) >= dueAfter else {
             return .skip("balances are recent")
         }
         return .sync(shapeNeeded(now: now))
@@ -147,9 +155,7 @@ struct SyncPolicy: Equatable, Sendable {
         // A database fact, never a Keychain read: asking macOS would turn a locked login keychain
         // into an app that silently stops scheduling anything.
         let connected = try SyncState.date(db, SyncState.connectedAt) != nil
-        let hasSyncedAccounts = try Int.fetchOne(
-            db, sql: "SELECT COUNT(*) FROM account WHERE source = 'simplefin'") ?? 0
-        policy.isConnected = connected || hasSyncedAccounts > 0
+        policy.isConnected = connected
         policy.serverWarnedAboutTheRate = try RequestBudget.serverWarnedAboutTheRate(db, now: now)
         policy.requestsRemaining = try RequestBudget.remaining(db, now: now)
         return policy

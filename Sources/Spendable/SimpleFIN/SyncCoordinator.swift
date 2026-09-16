@@ -4,6 +4,11 @@ import os
 
 /// What one sync did, in terms the app can show and the log can keep.
 struct SyncReport: Sendable {
+    enum HistoryStop: Equatable, Sendable {
+        case noMoreHistory, reachedThirteenMonths, budget, failed
+    }
+    var historyStopped: HistoryStop?
+    var coveredBackTo: String?
     var requestsSpent: Int = 0
     var windowsFetched: Int = 0
     var outcome: SyncOutcome = SyncOutcome()
@@ -23,12 +28,14 @@ struct SyncReport: Sendable {
     /// every first connection ends that way by design, and calling it an error would put a warning
     /// next to a bank that is working perfectly.
     var connectionIsWorking: Bool {
-        credentialProblem == nil && (balancesRefreshed || skippedBecause != nil)
+        if case .credentialRejected = failure { return false }
+        return credentialProblem == nil && (balancesRefreshed || skippedBecause != nil)
     }
 
     /// Something the owner needs to act on.
     var needsAttention: Bool {
-        credentialProblem != nil || (failure != nil && !balancesRefreshed)
+        if case .credentialRejected = failure { return true }
+        return credentialProblem != nil || (failure != nil && !balancesRefreshed)
     }
 }
 
@@ -42,6 +49,8 @@ actor SyncCoordinator {
     private let client: SimpleFINClient
     private let credentials: any CredentialStore
     private let calendar: Calendar
+    private var pausedForCredentialChange = false
+    private var inFlightID: UUID?
     private var inFlight: Task<SyncReport, Never>?
     private static let log = Logger(subsystem: StorePaths.bundleIdentifier, category: "sync")
 
@@ -63,6 +72,12 @@ actor SyncCoordinator {
 
     /// Decides whether to sync at all, then does it. One run at a time.
     func syncIfDue(trigger: SyncPolicy.Trigger, now: Date = .now) async -> SyncReport {
+        guard !pausedForCredentialChange else { return SyncReport(skippedBecause: "saving connection") }
+        if let existing = inFlight {
+            var report = await existing.value
+            report.joinedARunInProgress = true
+            return report
+        }
         let decision: SyncPolicy.Decision
         do {
             let policy = try await database.reader.read { db in try SyncPolicy.load(db, now: now) }
@@ -80,17 +95,29 @@ actor SyncCoordinator {
 
     /// Runs a sync, or joins the one already running.
     func sync(shape: SyncShape, now: Date = .now) async -> SyncReport {
+        guard !pausedForCredentialChange else { return SyncReport(skippedBecause: "saving connection") }
         if let existing = inFlight {
             var report = await existing.value
             report.joinedARunInProgress = true
             return report
         }
         let task = Task { [shape, now] in await run(shape: shape, now: now) }
+        let id = UUID()
+        inFlightID = id
         inFlight = task
         let report = await task.value
-        inFlight = nil
+        if inFlightID == id { inFlight = nil; inFlightID = nil }
         return report
     }
+
+    func pauseForCredentialChange() async {
+        pausedForCredentialChange = true
+        let id = inFlightID
+        if let existing = inFlight { _ = await existing.value }
+        if inFlightID == id { inFlight = nil; inFlightID = nil }
+    }
+
+    func resumeAfterCredentialChange() { pausedForCredentialChange = false }
 
     private func run(shape: SyncShape, now: Date) async -> SyncReport {
         var report = SyncReport()
@@ -125,9 +152,27 @@ actor SyncCoordinator {
             let set = try await client.accounts(credential: credential, kind: .balances)
             report.outcome = try await database.writer.write { [calendar] db in
                 let outcome = try SimpleFINIngest.ingest(set, kind: .balances, into: db, now: now, calendar: calendar)
-                try SyncState.setDate(db, SyncState.balancesSyncedAt, now)
-                try SyncState.setInteger(db, SyncState.failuresInARow, 0)
+                if !set.hasGeneralAuthFailure { try SyncState.setDate(db, SyncState.balancesSyncedAt, now) }
+                if !set.hasGeneralAuthFailure {
+                    try SyncState.clear(db, "credential-rejected")
+                    try SyncState.clear(db, "awaiting-first-balance")
+                    try SyncState.clear(db, "unverified-replacement-approved")
+                    if outcome.accountsInserted > 0, try BackfillProgress.load(db).state != .running {
+                        try BackfillProgress().save(db)
+                    }
+                    if try SyncState.date(db, SyncState.connectedAt) == nil {
+                        try SyncState.setDate(db, SyncState.connectedAt, now)
+                    }
+                    try SyncState.setInteger(db, SyncState.failuresInARow, 0)
+                }
+                let notices = String(decoding: try JSONEncoder().encode(outcome.notices), as: UTF8.self)
+                try SyncState.set(db, "connection-notices", notices)
                 return outcome
+            }
+            if set.hasGeneralAuthFailure {
+                report.failure = .credentialRejected(serverMessage: set.errlist.first { $0.code == "gen.auth" }?.msg)
+                await recordFailure(report.failure)
+                return report
             }
             report.balancesRefreshed = true
         } catch let refusal as RequestBudget.Refusal {
@@ -135,23 +180,23 @@ actor SyncCoordinator {
             return report
         } catch let failure as SimpleFINFailure {
             report.failure = failure
-            await recordFailure()
+            await recordFailure(report.failure)
             return report
         } catch {
             report.failure = .couldNotUnderstandAnswer
-            await recordFailure()
+            await recordFailure(report.failure)
             return report
         }
 
-        guard shape == .balancesAndTransactions else { return report }
+        guard shape == .balancesAndTransactions || report.outcome.accountsInserted > 0 else { return report }
 
-        await fetchTransactions(credential: credential, now: now, report: &report)
+        await fetchTransactions(credential: credential, forceRecent: report.outcome.accountsInserted > 0, now: now, report: &report)
         return report
     }
 
     /// Catches the transaction history up: the recent gap first, then whatever backfill is left.
     private func fetchTransactions(
-        credential: SimpleFINCredential, now: Date, report: inout SyncReport
+        credential: SimpleFINCredential, forceRecent: Bool, now: Date, report: inout SyncReport
     ) async {
         let today = CalendarDay(now, in: calendar)
 
@@ -164,14 +209,20 @@ actor SyncCoordinator {
                 """).map { CalendarDay(epochSeconds: $0, in: calendar) }
         } ?? nil
 
-        if let window = BackfillPlan.incrementalWindow(since: watermark, today: today, calendar: calendar) {
+        let recent = BackfillPlan.incrementalWindow(since: watermark, today: today, calendar: calendar)
+        let forced = forceRecent && watermark != nil ? today.adding(days: -43, in: calendar)...today : nil
+        if let window = forced ?? recent {
             let fetched = await fetchWindow(window, credential: credential, purpose: .refresh, now: now, report: &report)
             if fetched {
                 try? await database.writer.write { db in
                     try SyncState.setDate(db, SyncState.transactionsPulledAt, now)
                 }
             }
-            if report.failure != nil || report.refusal != nil { return }
+            if report.failure != nil || report.refusal != nil || report.outcome.historyWindowIncomplete {
+                report.stillFillingHistory = true
+                report.historyStopped = report.failure == nil && !report.outcome.historyWindowIncomplete ? .budget : .failed
+                return
+            }
         }
 
         await fillInHistory(credential: credential, today: today, now: now, report: &report)
@@ -188,7 +239,11 @@ actor SyncCoordinator {
         } catch {
             return
         }
-        guard progress.state == .running else { return }
+        report.coveredBackTo = progress.coveredBackTo
+        guard progress.state == .running else {
+            report.historyStopped = progress.state == .exhausted ? .noMoreHistory : .reachedThirteenMonths
+            return
+        }
 
         let windows = BackfillPlan.windows(endingOn: today, calendar: calendar)
         while progress.nextWindowIndex < windows.count {
@@ -199,11 +254,12 @@ actor SyncCoordinator {
             }) ?? 0
             guard remaining > Self.headroomForOrdinaryWork else {
                 report.stillFillingHistory = true
+                report.historyStopped = .budget
                 return
             }
 
             let window = windows[progress.nextWindowIndex]
-            let before = report.outcome.transactionsInserted + report.outcome.transactionsMatchedByContent
+            let before = report.outcome.transactionsSeen
             let fetched = await fetchWindow(window, credential: credential, purpose: .backfill, now: now, report: &report)
             guard fetched else {
                 // A refused or failed window leaves progress exactly where it was, so the same span
@@ -211,18 +267,23 @@ actor SyncCoordinator {
                 // saying otherwise would tell the owner their history is complete when months of
                 // it never arrived.
                 report.stillFillingHistory = true
+                report.historyStopped = report.failure != nil || report.outcome.historyWindowIncomplete ? .failed : .budget
                 try? await database.writer.write { [progress] db in try progress.save(db) }
                 return
             }
 
-            let after = report.outcome.transactionsInserted + report.outcome.transactionsMatchedByContent
+            let after = report.outcome.transactionsSeen
             progress.consecutiveEmptyWindows = after > before ? 0 : progress.consecutiveEmptyWindows + 1
             progress.nextWindowIndex += 1
             progress.coveredBackTo = window.lowerBound.isoString
+            report.coveredBackTo = progress.coveredBackTo
             if progress.consecutiveEmptyWindows >= 2 { progress.state = .exhausted }
             if progress.nextWindowIndex >= windows.count { progress.state = .reachedLimit }
             try? await database.writer.write { [progress] db in try progress.save(db) }
-            if progress.state != .running { return }
+            if progress.state != .running {
+                report.historyStopped = progress.state == .exhausted ? .noMoreHistory : .reachedThirteenMonths
+                return
+            }
         }
     }
 
@@ -245,16 +306,36 @@ actor SyncCoordinator {
             let kind = SimpleFINRequestKind.window(start: window.lowerBound, end: window.upperBound)
             let set = try await client.accounts(credential: credential, kind: kind)
             let outcome = try await database.writer.write { [calendar] db in
-                try SimpleFINIngest.ingest(set, kind: kind, into: db, now: now, calendar: calendar)
+                let outcome = try SimpleFINIngest.ingest(set, kind: kind, into: db, now: now, calendar: calendar)
+                if !outcome.notices.isEmpty {
+                    let stored = try String.fetchOne(db, sql: "SELECT value FROM sync_state WHERE key = ?", arguments: ["connection-notices"])
+                    var notices = stored.flatMap { try? JSONDecoder().decode([SyncNotice].self, from: Data($0.utf8)) } ?? []
+                    for notice in outcome.notices where !notices.contains(notice) { notices.append(notice) }
+                    try SyncState.set(db, "connection-notices", String(decoding: try JSONEncoder().encode(notices), as: UTF8.self))
+                }
+                return outcome
+            }
+            for notice in outcome.notices where !report.outcome.notices.contains(notice) { report.outcome.notices.append(notice) }
+            if set.hasGeneralAuthFailure {
+                report.failure = .credentialRejected(serverMessage: set.errlist.first { $0.code == "gen.auth" }?.msg)
+                await recordFailure(report.failure)
+                return false
             }
             report.windowsFetched += 1
             report.outcome.transactionsInserted += outcome.transactionsInserted
             report.outcome.transactionsMatchedByContent += outcome.transactionsMatchedByContent
+            report.outcome.transactionsSeen += outcome.transactionsSeen
             report.outcome.pendingSuperseded += outcome.pendingSuperseded
             report.outcome.pendingVoided += outcome.pendingVoided
+            report.outcome.historyWindowIncomplete = report.outcome.historyWindowIncomplete || outcome.historyWindowIncomplete
+            guard !outcome.historyWindowIncomplete else { return false }
+            try await database.writer.write { db in
+                try SyncState.setDate(db, SyncState.transactionsPulledAt, now)
+            }
             return true
         } catch let failure as SimpleFINFailure {
             report.failure = failure
+            if case .credentialRejected = failure { await recordFailure(failure) }
             Self.log.error("a window failed; progress left where it was")
             return false
         } catch {
@@ -272,8 +353,18 @@ actor SyncCoordinator {
         }
     }
 
-    private func recordFailure() async {
+    private func recordFailure(_ failure: SimpleFINFailure?) async {
+        guard failure != .couldNotReachServer(.offline) else { return }
         try? await database.writer.write { db in
+            if case .credentialRejected(let message) = failure {
+                try SyncState.set(db, "credential-rejected", message ?? "")
+                // Rejection can arrive after a successful balances step, or as HTTP 403 before
+                // ingestion runs at all. Keep the last figures, but never leave them looking live.
+                try db.execute(sql: """
+                    UPDATE account SET not_updating_since = COALESCE(not_updating_since, ?)
+                     WHERE source = 'simplefin' AND archived_at IS NULL
+                    """, arguments: [Int64(Date().timeIntervalSince1970)])
+            }
             let count = try SyncState.integer(db, SyncState.failuresInARow)
             try SyncState.setInteger(db, SyncState.failuresInARow, count + 1)
         }

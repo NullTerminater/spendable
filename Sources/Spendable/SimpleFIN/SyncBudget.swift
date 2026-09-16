@@ -80,8 +80,8 @@ enum RequestBudget {
         return max(0, min(overall, backfill))
     }
 
-    /// Records that the server itself warned about the rate. Everything scheduled stops for a day;
-    /// a manual refresh stays available, with the warning said out loud.
+    /// Records that the server itself warned about the rate. Scheduled and manual checks stop
+    /// for a rolling day, with the warning explained when the owner asks to refresh.
     static func recordServerQuotaWarning(_ db: Database, now: Date = .now) throws {
         try write(db, key: quotaTrippedKey, [now.timeIntervalSince1970])
     }
@@ -103,9 +103,7 @@ enum RequestBudget {
         // Only the most recent matter, and the list must not grow without bound.
         let trimmed = Array(values.sorted().suffix(maxInRollingDay * 2))
         let text = String(data: try JSONEncoder().encode(trimmed), encoding: .utf8) ?? "[]"
-        try db.execute(
-            sql: "INSERT INTO sync_state (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-            arguments: [key, text])
+        try SyncState.set(db, key, text)
     }
 }
 
@@ -184,8 +182,6 @@ struct BackfillProgress: Codable, Equatable, Sendable {
 
     func save(_ db: Database) throws {
         let text = String(data: try JSONEncoder().encode(self), encoding: .utf8) ?? "{}"
-        try db.execute(
-            sql: "INSERT INTO sync_state (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-            arguments: [Self.key, text])
+        try SyncState.set(db, Self.key, text)
     }
 }
