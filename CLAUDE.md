@@ -40,13 +40,13 @@ xcodebuild -project Spendable.xcodeproj -scheme Spendable -destination 'platform
 
 - Small commits with real messages. Each milestone ends with an annotated tag `v0.N-<name>` whose message carries the measured numbers.
 - Do not start the next milestone until the owner has seen the current one run.
-- Read `docs/HANDOFF.md` before writing any code. It says which milestones are built, where milestone 4 stopped, which contracts have been superseded, and which traps cost real time to find.
+- Read `docs/HANDOFF.md` before writing any code. It says which milestones are built, what milestone 4 contains, which contracts have been superseded, and which traps cost real time to find.
 - The plan and every decision the owner has made is `docs/PLAN.md`. Its numbered decision list binds every other document — including rule 11 (2026-09-15: an account holding shares or funds is never counted, and no switch is offered) and the negative-headline rule above.
 - Then read what the work needs. There are six documents and three reviews, and they are not interchangeable:
-  - `docs/HANDOFF.md` — where the project actually is: milestones 1–3 built, measured and tagged; milestone 4 half built; what remains, in order. Start here.
+  - `docs/HANDOFF.md` — where the project actually is: milestones 1–3 built, measured and tagged; milestone 4 implemented; validation and owner acceptance. Start here.
   - `docs/ENGINE.md` — the safe-to-spend contract (milestone 2, shipped).
   - `docs/SYNC.md` — the SimpleFIN client and sync contract (milestone 3, shipped).
-  - `docs/CONNECTING.md` — the milestone 4 design. Half built, and corrected in place by its own review: **where it and `docs/reviews/milestone-4-review.md` disagree, the review wins.** Never implement a rule from it without checking the review first.
+  - `docs/CONNECTING.md` — the milestone 4 implementation contract, including owner-approved rejected-credential repair (PLAN rule 13). Otherwise: **where it and `docs/reviews/milestone-4-review.md` disagree, the review wins.** Never implement a rule from it without checking the review first.
   - `docs/reviews/milestone-4-review.md` — the authority for the rest of milestone 4: 27 decisions, 8 findings rejected, 25 test cases, kept verbatim. Read it before writing any more milestone 4 code.
   - `docs/reviews/milestone-2-review.md` and `docs/reviews/milestone-3-review.md` — why several shipped rules look odd.
   - `README.md` — how to build, how to verify each milestone, and the measured numbers.
