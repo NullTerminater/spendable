@@ -84,12 +84,12 @@ struct SyncPolicyTests {
             == .skip("no requests left today"))
     }
 
-    @Test("the server warning about the rate stops everything scheduled, but not the owner")
+    @Test("the server warning about the rate protects the token for every trigger")
     func serverWarning() {
         #expect(Self.policy(warned: true).decide(trigger: .scheduled, now: Self.now)
             == .skip("SimpleFIN warned about the rate"))
         #expect(Self.policy(warned: true).decide(trigger: .manual, now: Self.now)
-            == .sync(.balancesAndTransactions))
+            == .skip("SimpleFIN warned about the rate"))
     }
 
     @Test("a spent budget stops every scheduled trigger")
@@ -111,7 +111,7 @@ struct SyncPolicyTests {
         try database.writer.write { db in try SyncState.setDate(db, SyncState.connectedAt, Self.now) }
         #expect(try database.reader.read { db in try SyncPolicy.load(db, now: Self.now) }.isConnected)
 
-        // So does the existence of a synced account.
+        // Old account rows alone never resurrect a disconnected credential.
         let second = try AppDatabase.inMemory()
         try second.writer.write { db in
             try db.execute(sql: """
@@ -119,7 +119,7 @@ struct SyncPolicyTests {
                 VALUES ('simplefin', 'CON-A', 'ACT-1', 'Checking', 'USD', 0, 0, 0)
                 """)
         }
-        #expect(try second.reader.read { db in try SyncPolicy.load(db, now: Self.now) }.isConnected)
+        #expect(try second.reader.read { db in try SyncPolicy.load(db, now: Self.now) }.isConnected == false)
     }
 
     @Test("the state the gates read is written where the fact becomes true")
@@ -177,5 +177,41 @@ struct SyncReportTests {
         let report = SyncReport(skippedBecause: "balances are recent")
         #expect(report.connectionIsWorking)
         #expect(!report.needsAttention)
+    }
+}
+
+@Suite("Milestone four scheduler gates")
+struct ActivityGateTests {
+    @Test("the activity uses a fire inside its tolerance; launch stays at six hours")
+    func earlyFire() {
+        let now = SyncPolicyTests.now
+        let policy = SyncPolicyTests.policy(balances: 5 * 3600 + 15 * 60, transactions: 3600)
+        for trigger in [SyncPolicy.Trigger.scheduled, .wake, .dayChanged] {
+            #expect(policy.decide(trigger: trigger, now: now) == .sync(.balancesOnly))
+        }
+        #expect(policy.decide(trigger: .launch, now: now) == .skip("balances are recent"))
+    }
+
+    @Test("budget wording never claims a refresh happened today when it did not")
+    func yesterdayBudget() {
+        let now = Date()
+        let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: now)!
+        let message = ConnectionPresentation.message(SyncReport(refusal: .dayIsFull), lastBalances: yesterday, now: now)!
+        #expect(message.contains("yesterday"))
+        #expect(!message.contains("Already refreshed today"))
+    }
+
+    @Test("history endings describe the bank limit and app limit separately")
+    func historyEndings() {
+        var report = SyncReport()
+        report.balancesRefreshed = true
+        report.outcome.accountsSeen = 1
+        report.coveredBackTo = "2026-08-03"
+        report.historyStopped = .noMoreHistory
+        #expect(ConnectionPresentation.message(report, lastBalances: nil)!.contains("as far as your bank goes"))
+        report.historyStopped = .reachedThirteenMonths
+        #expect(ConnectionPresentation.message(report, lastBalances: nil)!.contains("thirteen months"))
+        report.historyStopped = .budget
+        #expect(ConnectionPresentation.message(report, lastBalances: nil)!.contains("Nothing here is waiting on you"))
     }
 }

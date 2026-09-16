@@ -90,6 +90,17 @@ protocol CredentialStore: Sendable {
     /// read-back differs, so a caller never believes a credential is stored when it is not.
     func save(_ credential: SimpleFINCredential) throws
     func delete() throws
+    /// Verify a replacement before switching away from the credential the screen checked.
+    func replace(_ credential: SimpleFINCredential, expected: SimpleFINCredential) throws
+}
+
+extension CredentialStore {
+    func replace(_ credential: SimpleFINCredential, expected: SimpleFINCredential) throws {
+        let active = try load()
+        if active == credential { return }
+        guard active == expected else { throw CredentialStoreError.verificationFailed }
+        try save(credential)
+    }
 }
 
 final class InMemoryCredentialStore: CredentialStore {
@@ -180,6 +191,44 @@ final class KeychainCredentialStore: CredentialStore {
         guard let readBack, readBack == credential else {
             throw CredentialStoreError.verificationFailed
         }
+    }
+
+    /// During staging, load() still decodes the original flattened fields. The candidate is read
+    /// back while the original remains active; one atomic SecItemUpdate then promotes verified
+    /// bytes. A failed staging/read/promotion leaves the original connection usable.
+    func replace(_ credential: SimpleFINCredential, expected: SimpleFINCredential) throws {
+        let active = try load()
+        if active == credential { return }
+        guard active == expected else { throw CredentialStoreError.verificationFailed }
+        let original = try Self.encode(expected)
+        let candidate = try Self.encode(credential)
+        var staged = try JSONSerialization.jsonObject(with: original) as! [String: Any]
+        staged["replacement"] = try JSONSerialization.jsonObject(with: candidate)
+        let stagedData = try JSONSerialization.data(withJSONObject: staged, options: [.sortedKeys])
+        var promoted = false
+        defer {
+            if !promoted {
+                // Best effort cleanup. Even if the keychain locks, flattened active fields are old.
+                _ = SecItemUpdate(baseQuery() as CFDictionary, [kSecValueData as String: original] as CFDictionary)
+            }
+        }
+        try writePayload(stagedData)
+        var query = baseQuery()
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var value: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &value)
+        guard status == errSecSuccess else { throw CredentialStoreError.keychain(status, while: .writing) }
+        guard let readBack = value as? Data, readBack == stagedData else {
+            throw CredentialStoreError.verificationFailed
+        }
+        try writePayload(candidate)
+        promoted = true
+    }
+
+    private func writePayload(_ data: Data) throws {
+        let status = SecItemUpdate(baseQuery() as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        guard status == errSecSuccess else { throw CredentialStoreError.keychain(status, while: .writing) }
     }
 
     func delete() throws {
