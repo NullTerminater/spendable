@@ -89,15 +89,20 @@ enum SafeToSpendNarrative {
             lines.append("These balances are from \(oldest.relativePhrase(now: report.today, in: calendar)) and may have changed.")
         }
 
-        for block in figure.heldOutBlocks where block.reason == .stoppedUpdating {
+        for block in figure.heldOutBlocks where [.stoppedUpdating, .typeNotSet, .notLookedInsideYet, .notUSDollars].contains(block.reason) {
             lines.append(heldOutSentence(block, locale: locale, calendar: calendar, today: report.today))
         }
 
         // A held-out account that owes more than it holds is promoted out of the explanation: a
         // clean number with a hole behind it is worse than no number.
-        for block in figure.heldOutBlocks where block.reason != .stoppedUpdating && block.netCents < 0 {
+        for block in figure.heldOutBlocks where block.reason == .savingsNotCounted && block.netCents < 0 {
             lines.append(heldOutSentence(block, locale: locale, calendar: calendar, today: report.today))
         }
+
+        for account in report.accounts where account.standing == .supersededPendingAnswer {
+            lines.append("\(Cents.format(account.balanceCents, locale: locale)) in your hand-entered \(account.name) isn't counted while I wait to hear whether it's the same account as the one your bank sent. The bills you pay from it are still being subtracted.")
+        }
+        lines.append(contentsOf: orphanedBillLines(report: report, figure: figure, locale: locale))
 
         if figure.payPending, let payday = figure.paydayForPending,
            let newest = report.accounts.filter({ $0.standing.isCounted }).map(\.asOf).max() {
@@ -114,21 +119,34 @@ enum SafeToSpendNarrative {
     private static func heldOutSentence(
         _ block: HeldOutBlock, locale: Locale, calendar: Calendar, today: CalendarDay
     ) -> String {
-        let balance = Cents.format(block.balanceCents, locale: locale)
+        let balance = Cents.format(block.balanceCents, locale: locale, currency: block.currency)
         let head: String
         switch block.reason {
         case .stoppedUpdating:
-            head = block.source == .manual
-                ? "\(balance) in \(block.accountName) isn't counted. You last updated it on \(block.asOf.shortPhrase(in: calendar))."
-                : "\(balance) in \(block.accountName) isn't counted. Your bank stopped sending new balances on \(block.asOf.shortPhrase(in: calendar)), so I don't know what's in it now."
+            if block.source == .manual {
+                head = "\(balance) in \(block.accountName) isn't counted. You last updated it on \(block.asOf.shortPhrase(in: calendar))."
+            } else if let missingSince = block.notUpdatingSince,
+                      block.asOf.days(to: today, in: calendar) <= SafeToSpendEngine.deadAfterDays {
+                let date = Date(timeIntervalSince1970: TimeInterval(missingSince))
+                let time = date.formatted(Date.FormatStyle(locale: locale, calendar: calendar, timeZone: calendar.timeZone).hour().minute())
+                let missingDay = CalendarDay(epochSeconds: missingSince, in: calendar)
+                head = "\(block.accountName) held \(balance) on \(block.asOf.shortPhrase(in: calendar)), and that's the last figure I have. It wasn't in a successful answer from SimpleFIN at \(time) \(missingDay.relativePhrase(now: today, in: calendar)), so I've stopped counting it until it comes back."
+            } else {
+                head = "\(balance) in \(block.accountName) isn't counted. Your bank stopped sending new balances on \(block.asOf.shortPhrase(in: calendar)), so I don't know what's in it now."
+            }
         case .savingsNotCounted:
             head = "\(balance) in \(block.accountName) isn't counted, because you haven't asked me to count that savings account."
         case .typeNotSet:
             head = "\(balance) in \(block.accountName) isn't counted until you tell me what kind of account it is."
         case .notUSDollars:
-            head = "\(block.accountName) isn't in US dollars, so it isn't counted."
+            let currency = locale.localizedString(forCurrencyCode: block.currency) ?? block.currency
+            head = "\(block.accountName) isn't in the figures above, because it's in \(currency)."
         case .holdsInvestments:
-            head = "\(block.accountName) holds investments rather than money, so it isn't counted. What it's worth moves with the market, and it isn't there to spend this month."
+            head = "\(block.accountName) holds shares and funds, not money. What it's worth goes up and down with the market, so I never count it — there's no switch for this one."
+        case .isALoan:
+            head = "\(block.accountName) is money you owe, not money you have, so it isn't counted here."
+        case .notLookedInsideYet:
+            head = "I haven't looked inside \(block.accountName) yet, so I don't know whether it holds money or shares and funds. I'll know once I've fetched its transactions — usually within a few minutes, and by tomorrow at the latest."
         }
         guard block.obligationsCents > 0 else { return head }
         let owed = Cents.format(block.obligationsCents, locale: locale)
@@ -296,6 +314,8 @@ enum SafeToSpendNarrative {
             case .typeNotSet: why = "which isn't counted until you tell me what kind of account it is"
             case .notUSDollars: why = "which isn't in US dollars and isn't counted"
             case .holdsInvestments: why = "which holds investments rather than money"
+            case .isALoan: why = "which is a loan, not money you have"
+            case .notLookedInsideYet: why = "which isn't counted until I've checked whether it holds money or shares"
             }
             return "\(obligation.name) \(amount) comes out of \(accountName), \(why)"
         case .onCardWithStatement(let cardName):
@@ -365,16 +385,14 @@ enum SafeToSpendNarrative {
         let cards = report.accounts.filter { $0.standing == .creditCard && $0.balanceCents != 0 }
         for card in cards {
             let owed = Cents.format(Int64(clamping: card.balanceCents.magnitude), locale: locale)
-            lines.append("You owe \(owed) on \(card.name). No number here subtracts that — tell me its statement balance and the day it's due and I'll count the payment.")
+            if card.isTypeConfirmed {
+                lines.append("You owe \(owed) on \(card.name). No number here subtracts that — tell me its statement balance and the day it's due and I'll count the payment.")
+            } else {
+                lines.append("I think \(card.name) is a credit card, going by its name, so I'm not counting it as money you have. It shows \(owed) owed. Is that right?")
+            }
         }
 
-        // A bill still pointing at an account the owner has put away has to come from somewhere,
-        // so it is subtracted — but they should be told, because the app picked for them.
-        let archivedIds = Set(report.accounts.filter { $0.standing == .archived }.map(\.id))
-        for obligation in figure.obligations where obligation.payingAccountId.map(archivedIds.contains) == true {
-            let name = report.accounts.first { $0.id == obligation.payingAccountId }?.name ?? "an account"
-            lines.append("\(obligation.name) \(Cents.format(obligation.amountCents, locale: locale)) still comes out of \(name), which you've put away — tell me which account pays it now.")
-        }
+        lines.append(contentsOf: orphanedBillLines(report: report, figure: figure, locale: locale))
 
         for charge in report.undatedCharges {
             lines.append("\(charge.name) \(Cents.format(charge.amountCents, locale: locale)) — I don't know when this is next due, so it isn't subtracted.")
@@ -384,6 +402,21 @@ enum SafeToSpendNarrative {
             ? "This is only money you have now. Your paycheck on \(figure.payday!.shortPhrase(in: calendar)) isn't part of it."
             : "This doesn't count your next paycheck.")
         return lines
+    }
+
+    private static func orphanedBillLines(
+        report: SafeToSpendReport, figure: SpendableFigure, locale: Locale
+    ) -> [String] {
+        figure.obligations.compactMap { obligation in
+            guard let account = report.accounts.first(where: { $0.id == obligation.payingAccountId }),
+                  account.standing == .archived || account.standing == .supersededPendingAnswer,
+                  obligation.treatment.comesOffTheNumber else { return nil }
+            let amount = Cents.format(obligation.amountCents, locale: locale)
+            if account.standing == .supersededPendingAnswer {
+                return "\(obligation.name) \(amount) still comes out of your hand-entered \(account.name), so I'm still subtracting it while you answer whether these are the same account."
+            }
+            return "\(obligation.name) \(amount) still comes out of \(account.name), which you've put away — tell me which account pays it now."
+        }
     }
 
     /// "a, b and c" — the way a person writes a list.

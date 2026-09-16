@@ -17,6 +17,12 @@ enum DebugLaunchOptions {
     @MainActor
     static func apply(model: AppModel) {
         let environment = ProcessInfo.processInfo.environment
+        if let fixture = environment["SPENDABLE_DEBUG_FIXTURE"] {
+            Task {
+                guard await waitForDatabase(model) != nil else { return }
+                await model.replayConnectionFixture(fixture)
+            }
+        }
         if environment["SPENDABLE_DEBUG_SEED_SAMPLE"] != nil {
             Task { await seedSampleAccounts(model) }
         }
@@ -51,7 +57,7 @@ enum DebugLaunchOptions {
         }
         guard let database = await waitForDatabase(model) else { return }
 
-        let store = KeychainCredentialStore(account: KeychainCredentialStore.demoAccount)
+        let store = model.credentialStore
         let client = SimpleFINClient()
 
         do {
@@ -80,7 +86,8 @@ enum DebugLaunchOptions {
         try? await database.writer.write { db in
             try SyncState.setDate(db, SyncState.connectedAt, Date())
         }
-        let coordinator = SyncCoordinator(database: database, client: client, credentials: store)
+        guard let coordinator = model.syncCoordinator else { return }
+        model.startScheduling()
         let report = await coordinator.sync(shape: .balancesAndTransactions)
         var verdict = "ok"
         if let problem = report.credentialProblem {

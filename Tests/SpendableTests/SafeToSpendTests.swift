@@ -292,7 +292,7 @@ struct SafeToSpendTests {
         #expect(classified.allSatisfy { $0.standing == .heldOut(.stoppedUpdating) })
     }
 
-    @Test("an archived account is silent, but its bills still come out of money that is counted")
+    @Test("archived balances stay silent, while their orphaned bills are named and still subtracted")
     func archivedAccount() {
         let accounts = [
             Self.account(id: 1, "Chase Checking", .checking, 90_000, asOf: Self.day(2026, 9, 14)),
@@ -305,7 +305,10 @@ struct SafeToSpendTests {
         #expect(report.month.heldOutBlocks.isEmpty)
         let under = SafeToSpendNarrative.linesUnderTheNumber(
             report: report, figure: report.month, locale: Self.us, calendar: Self.chicago)
-        #expect(under.isEmpty)
+        #expect(under.count == 1)
+        #expect(under[0].contains("Gym") && under[0].contains("Old Credit Union"))
+        #expect(under[0].contains("which you've put away"))
+        #expect(!under.contains { $0.contains("stopped updating") || $0.contains("isn't counted") })
         #expect(Self.text(report, report.month).contains("which you've put away"))
     }
 
@@ -584,8 +587,10 @@ struct SafeToSpendTests {
         #expect(a.contributedCents == 90_000)
         #expect(a.usedAvailableBalance)
 
-        let guessed = Self.account(id: 1, "Chase Checking", .checking, 100_000, asOf: Self.day(2026, 9, 14),
+        var guessed = Self.account(id: 1, "Chase Checking", .checking, 100_000, asOf: Self.day(2026, 9, 14),
                                    source: .simplefin, available: 90_000, typeIsGuess: true)
+        // M4 has already checked that this guessed deposit account holds money, not shares.
+        guessed.holdingsObservedAt = guessed.balanceDate
         let b = SafeToSpendEngine.classify(guessed, today: Self.day(2026, 9, 14), calendar: Self.chicago)
         #expect(b.contributedCents == 100_000)
         #expect(!b.usedAvailableBalance)
@@ -640,7 +645,10 @@ struct SafeToSpendTests {
         ]
         let report = Self.report(accounts: accounts, today: Self.day(2026, 9, 14))
         #expect(report.month.contributedCents == 30_000)
-        #expect(Self.text(report, report.month).contains("isn't in US dollars"))
+        let explanation = Self.text(report, report.month)
+        #expect(explanation.contains("Revolut EUR isn't in the figures above"))
+        #expect(explanation.lowercased().contains("euro"))
+        #expect(!explanation.contains("$5,000"))
     }
 
     @Test("a confirmed bill with no due date is named rather than silently dropped")

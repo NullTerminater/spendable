@@ -30,6 +30,10 @@ enum HeldOutReason: Equatable, Sendable {
     /// It is held out whatever it is called and whatever the owner opts into: a share portfolio
     /// that moves with the market is not money to spend this month.
     case holdsInvestments
+    /// A loan is money owed, not an unknown balance that could become spending money.
+    case isALoan
+    /// A keyword guess awaits the dated answer that says whether it holds money or shares.
+    case notLookedInsideYet
 }
 
 enum AccountStanding: Equatable, Sendable {
@@ -39,6 +43,8 @@ enum AccountStanding: Equatable, Sendable {
     case creditCard
     /// Put away by the owner. Not counted and never mentioned under the number.
     case archived
+    /// A manual account may duplicate one just sent by the bank. Keep its bills, count one balance.
+    case supersededPendingAnswer
 
     var isCounted: Bool {
         if case .counted = self { return true }
@@ -69,6 +75,10 @@ struct ClassifiedAccount: Equatable, Sendable, Identifiable {
     /// True when an available balance was ignored for being larger than the balance, which is the
     /// shape of a credit line rather than money.
     let ignoredAvailableBalance: Bool
+    var isTypeConfirmed: Bool = false
+    var currency: String = "USD"
+    var notUpdatingSince: Int64? = nil
+    var resumedUpdatingAt: Int64? = nil
 
     /// How many whole days behind today this account's balance is.
     func daysOld(today: CalendarDay, calendar: Calendar) -> Int {
@@ -145,6 +155,8 @@ struct HeldOutBlock: Equatable, Sendable {
     let asOf: CalendarDay
     let balanceCents: Int64
     let obligationsCents: Int64
+    var currency: String = "USD"
+    var notUpdatingSince: Int64? = nil
 
     /// What the account would have left after its own bills, on the last figures known.
     var netCents: Int64 { balanceCents - obligationsCents }
@@ -251,7 +263,22 @@ enum SafeToSpendEngine {
         // Accounts that exist but cannot be counted mean the app does not know — however little
         // those accounts contain. An empty held-out account is still an account whose money the app
         // cannot vouch for, and answering $0 in that state would read as a fact rather than a gap.
-        if counted.isEmpty { return .nothingCountable(classified) }
+        if counted.isEmpty {
+            // Putting away the last account cannot erase bills still owed from it. Only that
+            // explicit owner action yields a known zero pool; missing/untyped money stays unknown.
+            let orphanedIds = Set(classified.filter {
+                $0.standing == .archived || $0.standing == .supersededPendingAnswer
+            }.map(\.id))
+            let monthEnd = today.endOfMonth(in: calendar)
+            let paydayEnd = paySchedule?.nextPayday(after: today, in: calendar)?.adding(days: -1, in: calendar)
+            let end = max(monthEnd, paydayEnd ?? monthEnd)
+            let window = today.startOfMonth(in: calendar)...end
+            let hasOrphanedBills = charges.contains {
+                $0.status == .confirmed && $0.payingAccountId.map(orphanedIds.contains) == true
+                    && !$0.occurrences(in: window, calendar: calendar).isEmpty
+            }
+            guard hasOrphanedBills else { return .nothingCountable(classified) }
+        }
 
         let confirmed = charges.filter { $0.status == .confirmed }
         let datable = confirmed.filter { $0.nextExpectedDate != nil }
@@ -305,15 +332,22 @@ enum SafeToSpendEngine {
         let standing: AccountStanding
         if account.archivedAt != nil {
             standing = .archived
+        } else if account.mergeCandidateFor != nil && account.mergeAnsweredAt == nil {
+            standing = .supersededPendingAnswer
         } else if account.currency != "USD" {
             standing = .heldOut(.notUSDollars)
-        } else if account.holdingsCount > 0 {
+        } else if account.guessClass == "loan" {
+            standing = .heldOut(.isALoan)
+        } else if account.guessClass == "investment" || account.holdingsCount > 0 {
             // Above "no type" and above credit on purpose. The money is held out either way, but
             // the *sentence* is not the same: an untyped account holding shares would otherwise be
             // offered the four-way type question, and answering "credit" — the only honest-looking
             // answer for something that isn't spending money — would print "You owe $128,400" about
             // a share portfolio. Holdings are the truth about an account whatever it is called.
             standing = .heldOut(.holdsInvestments)
+        } else if account.source == .simplefin && account.userType == nil
+                    && (type == .checking || type == .cash) && account.holdingsObservedAt == nil {
+            standing = .heldOut(.notLookedInsideYet)
         } else if type == nil {
             standing = .heldOut(.typeNotSet)
         } else if type == .credit {
@@ -342,7 +376,11 @@ enum SafeToSpendEngine {
             balanceCents: balance,
             contributedCents: standing.isCounted ? contributed : 0,
             usedAvailableBalance: standing.isCounted && useAvailable,
-            ignoredAvailableBalance: availableLooksLikeCredit)
+            ignoredAvailableBalance: standing.isCounted && availableLooksLikeCredit,
+            isTypeConfirmed: account.userType != nil,
+            currency: account.currency,
+            notUpdatingSince: account.notUpdatingSince,
+            resumedUpdatingAt: account.resumedUpdatingAt)
     }
 
     // MARK: Working out one figure
@@ -411,7 +449,8 @@ enum SafeToSpendEngine {
             guard account.balanceCents != 0 || owed != 0 else { continue }
             blocks.append(HeldOutBlock(
                 accountName: account.name, source: account.source, reason: reason,
-                asOf: account.asOf, balanceCents: account.balanceCents, obligationsCents: owed))
+                asOf: account.asOf, balanceCents: account.balanceCents, obligationsCents: owed,
+                currency: account.currency, notUpdatingSince: account.notUpdatingSince))
         }
 
         var days: Int?
@@ -461,7 +500,7 @@ enum SafeToSpendEngine {
             switch destination.standing {
             case .counted:
                 return .notSubtracted(.movesIntoCountedAccount(accountName: destination.name))
-            case .creditCard, .heldOut, .archived:
+            case .creditCard, .heldOut, .archived, .supersededPendingAnswer:
                 // Into a card, or into savings that is not counted: the money leaves.
                 return .subtracted
             }
@@ -476,7 +515,7 @@ enum SafeToSpendEngine {
         switch paying.standing {
         case .counted:
             return .subtracted
-        case .archived:
+        case .archived, .supersededPendingAnswer:
             // A closed account cannot pay anything, so the bill comes out of money that is counted.
             return .subtracted
         case .heldOut(let reason):

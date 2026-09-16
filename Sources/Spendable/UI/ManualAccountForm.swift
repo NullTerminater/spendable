@@ -60,10 +60,6 @@ struct ManualAccountForm: View {
             }
 
             HStack {
-                if existing != nil {
-                    Button("Remove this account", role: .destructive) { Task { await archive() } }
-                        .disabled(saving)
-                }
                 Spacer()
                 Button("Cancel") { dismiss() }
                     .keyboardShortcut(.cancelAction)
@@ -99,14 +95,16 @@ struct ManualAccountForm: View {
         defer { saving = false }
         do {
             let now = Int64(Date.now.timeIntervalSince1970)
-            if var account = existing {
-                account.displayName = trimmedName
-                account.userType = type
-                account.balanceCents = stored
-                account.balanceDate = now
-                account.manualUpdatedAt = now
-                let updated = account
-                try await database.writer.write { db in try updated.update(db) }
+            if let account = existing, let id = account.id {
+                let selectedType = type
+                // A first bank sync can flag a duplicate while this sheet is open. Saving an old
+                // whole-row snapshot would silently clear that safeguard and count both balances.
+                try await database.writer.write { db in
+                    try db.execute(sql: """
+                        UPDATE account SET display_name = ?, user_type = ?, balance_cents = ?,
+                            balance_date = ?, manual_updated_at = ? WHERE id = ? AND source = 'manual'
+                        """, arguments: [trimmedName, selectedType.rawValue, stored, now, now, id])
+                }
             } else {
                 let account = Account.manual(displayName: trimmedName, type: type, balanceCents: stored)
                 try await database.writer.write { db in
@@ -117,20 +115,6 @@ struct ManualAccountForm: View {
             dismiss()
         } catch {
             problem = "Spendable couldn't save that. Try again."
-        }
-    }
-
-    private func archive() async {
-        guard var account = existing else { return }
-        saving = true
-        defer { saving = false }
-        do {
-            account.archivedAt = Int64(Date.now.timeIntervalSince1970)
-            let archived = account
-            try await database.writer.write { db in try archived.update(db) }
-            dismiss()
-        } catch {
-            problem = "Spendable couldn't remove that. Try again."
         }
     }
 

@@ -4,6 +4,7 @@ import SwiftUI
 struct OverviewView: View {
     let store: SpendableStore
     @Bindable var state: MainWindowState
+    var connect: () -> Void = {}
 
     @State private var showingWorkings = true
     @State private var settingPayday = false
@@ -39,6 +40,7 @@ struct OverviewView: View {
                 .foregroundStyle(.secondary)
             Button("Add an account by hand") { state.addingAccount = true }
                 .buttonStyle(.borderedProminent)
+            Button("Connect your bank through SimpleFIN") { connect() }
         }
     }
 
@@ -46,6 +48,9 @@ struct OverviewView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("I can't work this out right now.")
                 .font(.system(size: 30, weight: .semibold))
+            ForEach(Array(store.accountLinesUnderNumber.enumerated()), id: \.offset) { _, line in
+                Text(line).font(.callout)
+            }
             // An account that has been put away is never named under the number and never raises a
             // warning — including here, where it would be the one line with no explanation attached.
             ForEach(accounts.filter { $0.standing != .archived }) { account in
@@ -57,25 +62,8 @@ struct OverviewView: View {
     }
 
     private func cannotWorkOutLine(_ account: ClassifiedAccount) -> String {
-        let amount = Cents.format(account.balanceCents)
-        switch account.standing {
-        case .heldOut(.stoppedUpdating):
-            return account.source == .manual
-                ? "\(account.name) was \(amount) when you last updated it on \(account.asOf.shortPhrase()) — update it and I'll work this out."
-                : "\(account.name) was \(amount) when your bank last sent a balance, on \(account.asOf.shortPhrase())."
-        case .heldOut(.typeNotSet):
-            return "\(account.name) holds \(amount), but I don't know what kind of account it is yet."
-        case .heldOut(.savingsNotCounted):
-            return "\(account.name) holds \(amount) in savings, which you haven't asked me to count."
-        case .heldOut(.notUSDollars):
-            return "\(account.name) isn't in US dollars, so I can't count it."
-        case .heldOut(.holdsInvestments):
-            return "\(account.name) holds investments worth \(amount), which isn't money I can count as spendable."
-        case .creditCard:
-            return "\(account.name) is a card, so what's on it is money you owe, not money you have."
-        case .archived, .counted:
-            return "\(account.name): \(amount)."
-        }
+        guard let source = store.accounts.first(where: { $0.id == account.id }) else { return account.name }
+        return AccountPresentation.row(source, classified: account, notices: store.syncNotices)
     }
 
     // MARK: The number
@@ -102,10 +90,12 @@ struct OverviewView: View {
                 .foregroundStyle(.secondary)
             Text(SafeToSpendDisplay.headline(figure.remainderCents))
                 .font(.system(size: 52, weight: .semibold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.45)
                 .monospacedDigit()
                 .textSelection(.enabled)
 
-            ForEach(Array(SafeToSpendNarrative.linesUnderTheNumber(report: report, figure: figure).enumerated()), id: \.offset) { _, line in
+            ForEach(Array(linesUnderNumber(report: report, figure: figure).enumerated()), id: \.offset) { _, line in
                 Label {
                     Text(line)
                 } icon: {
@@ -148,6 +138,14 @@ struct OverviewView: View {
                 .buttonStyle(.link)
                 .font(.callout)
         }
+    }
+
+    private func linesUnderNumber(report: SafeToSpendReport, figure: SpendableFigure) -> [String] {
+        let troubledNames = store.accounts.filter { AccountPresentation.notice(for: $0, in: store.syncNotices) != nil }.map(\.displayName)
+        let standard = SafeToSpendNarrative.linesUnderTheNumber(report: report, figure: figure).filter { line in
+            !troubledNames.contains(where: { line.contains($0) && (line.contains("stopped") || line.contains("last")) })
+        }
+        return store.accountLinesUnderNumber + standard
     }
 }
 
