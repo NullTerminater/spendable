@@ -307,12 +307,17 @@ enum SafeToSpendEngine {
             standing = .archived
         } else if account.currency != "USD" {
             standing = .heldOut(.notUSDollars)
+        } else if account.holdingsCount > 0 {
+            // Above "no type" and above credit on purpose. The money is held out either way, but
+            // the *sentence* is not the same: an untyped account holding shares would otherwise be
+            // offered the four-way type question, and answering "credit" — the only honest-looking
+            // answer for something that isn't spending money — would print "You owe $128,400" about
+            // a share portfolio. Holdings are the truth about an account whatever it is called.
+            standing = .heldOut(.holdsInvestments)
         } else if type == nil {
             standing = .heldOut(.typeNotSet)
         } else if type == .credit {
             standing = .creditCard
-        } else if account.holdingsCount > 0 {
-            standing = .heldOut(.holdsInvestments)
         } else if type == .savings && account.includeInSafeToSpend != true {
             standing = .heldOut(.savingsNotCounted)
         } else if account.notUpdatingSince != nil {
