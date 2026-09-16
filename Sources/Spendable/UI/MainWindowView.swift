@@ -145,7 +145,7 @@ struct AccountRow: View {
             Text(standingSentence)
                 .font(.caption)
                 .foregroundStyle(isHeldOut ? .orange : .secondary)
-            if account.effectiveType == .savings {
+            if offersTheSavingsSwitch {
                 Toggle("Count this towards what I can spend", isOn: Binding(
                     get: { account.includeInSafeToSpend == true },
                     set: { include in Task { await store.setIncludeInSafeToSpend(account, include) } }))
@@ -169,6 +169,25 @@ struct AccountRow: View {
         return classified?.standing == .counted(.stale)
     }
 
+    /// Whether to offer "count this towards what I can spend".
+    ///
+    /// Only when turning it on would actually change the number. An account holding shares is held
+    /// out whatever its type says, so offering the switch there would be a control that does
+    /// nothing — and worse, one that suggests the owner could put a share portfolio into what they
+    /// can spend this month. They have said plainly that they do not want that.
+    private var offersTheSavingsSwitch: Bool {
+        guard account.effectiveType == .savings else { return false }
+        switch classified?.standing {
+        case .heldOut(.savingsNotCounted), .counted:
+            return true
+        case .none:
+            // Before the first classification, go by the type alone.
+            return account.holdingsCount == 0
+        default:
+            return false
+        }
+    }
+
     private var standingSentence: String {
         let day = AsOf.dayPhrase(epochSeconds: account.balanceDate)
         guard let standing = classified?.standing else {
@@ -190,7 +209,7 @@ struct AccountRow: View {
         case .heldOut(.notUSDollars):
             return "Not in US dollars, so it isn't counted."
         case .heldOut(.holdsInvestments):
-            return "Holds investments, not money. Not counted towards what you can spend."
+            return "Holds shares or funds, not money. What it's worth moves with the market, so it's never counted towards what you can spend — there's no switch for this one."
         case .creditCard:
             return "Money you owe, never counted as money you have. As of \(day)."
         case .archived:

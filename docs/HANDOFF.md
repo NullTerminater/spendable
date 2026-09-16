@@ -19,8 +19,8 @@ The plan and every decision the owner has made is `docs/PLAN.md`. Read that firs
 | 8. WidgetKit extension over a summary file | Not started (a throwaway stub exists from milestone 1) | — |
 | 9. Settings, re-claim, diagnostics, final performance pass | Not started | — |
 
-182 tests pass. `main` is pushed to the private remote. Everything for milestone 4 is **uncommitted
-working tree** except the review document.
+182 tests pass and `main` is pushed to the private remote, including the half of milestone 4 that is
+built. Nothing is sitting uncommitted.
 
 ## How to verify what is done
 
@@ -151,17 +151,20 @@ In the order I would do them. Each item names the decision in
 11. **Tests** for all of the above, from the review's 25 cases.
 12. **Measure, commit in small pieces, tag `v0.4-connected`, then stop** and let the owner run it.
 
-## One question the review raised for the owner
+## The one question the review raised — now answered
 
-The owner's decision 4 says keyword-backed type guesses count immediately. The holdings rule
-qualifies that for `checking` and `cash` guesses only: such a guess does not count until an answer
-that lists holdings has been seen for that account. Normally that is the same sync, because a
-balances refresh that turns up a new account now fetches its transactions in the same run. In the
-rare case where that dated answer is refused by the budget or fails, a genuinely-ordinary current
-account is visibly held out, with a sentence, for up to a day rather than counting.
+The review asked whether a `checking` or `cash` guess should be held out until the app has looked
+inside the account. The owner answered on 15 September: **safe is always better than faster.** They
+have no shares, expect never to, and would treat them as savings rather than spending money if they
+did. So the safe reading stands, and it is now rule 11 in `docs/PLAN.md`:
 
-I implemented the safe reading, because the alternative risk is a share portfolio entering the
-headline as spendable money. It is worth confirming, and it is the only open question.
+- An account holding shares or funds is never counted, and **no switch is offered** to change that.
+  Offering one would be a control that does nothing, and would suggest a share portfolio could
+  become this month's spending money.
+- A `checking` or `cash` guess on an account not yet looked inside does not count until a dated
+  answer has arrived for it.
+
+There are no open questions for the owner.
 
 ---
 
