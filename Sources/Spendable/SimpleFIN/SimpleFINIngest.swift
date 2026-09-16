@@ -2,8 +2,8 @@ import Foundation
 import GRDB
 
 /// Something worth telling the owner about a sync, already attributed to whoever it is about.
-struct SyncNotice: Equatable, Sendable {
-    enum Scope: Equatable, Sendable {
+struct SyncNotice: Equatable, Sendable, Codable {
+    enum Scope: Equatable, Sendable, Codable {
         case account(Int64)
         case connection(String)
         /// True of the whole connection: the saved credential no longer works.
@@ -24,6 +24,9 @@ struct SyncOutcome: Equatable, Sendable {
     var accountsInserted: Int = 0
     var transactionsInserted: Int = 0
     var transactionsMatchedByContent: Int = 0
+    /// Rows returned by successfully read accounts, including ids already stored locally.
+    var transactionsSeen: Int = 0
+    var historyWindowIncomplete: Bool = false
     var pendingSuperseded: Int = 0
     var pendingVoided: Int = 0
     var accountsMarkedNotUpdating: Int = 0
@@ -154,8 +157,22 @@ enum SimpleFINIngest {
         for incoming in set.accounts {
             let connection = set.connection(incoming.connId)
             let rowId = try upsertAccount(incoming, connection: connection, db: db,
-                                          nowSeconds: nowSeconds, outcome: &outcome)
+                                          nowSeconds: nowSeconds, outcome: &outcome,
+                                          liveConnectionIds: Set((set.connections ?? []).map(\.connId)))
             seen.insert(rowId)
+            let incomingHasError = troubled.contains(rowId) || set.hasGeneralAuthFailure || set.errlist.contains { error in
+                if error.prefix == "con", let connId = error.connId { return connId == incoming.connId }
+                if error.prefix == "act", error.accountId == incoming.id, let connId = error.connId {
+                    return connId == incoming.connId
+                }
+                return false
+            }
+            if incomingHasError {
+                try db.execute(
+                    sql: "UPDATE account SET not_updating_since = COALESCE(not_updating_since, ?) WHERE id = ?",
+                    arguments: [nowSeconds, rowId])
+                continue
+            }
 
             guard let balance = try? Cents.parse(incoming.balance) else {
                 // A balance that will not parse fails that account: it keeps what it had, is marked
@@ -175,13 +192,15 @@ enum SimpleFINIngest {
             try db.execute(sql: """
                 UPDATE account
                    SET balance_cents = ?, available_cents = ?, balance_date = ?,
-                       last_seen_in_sync_at = ?, not_updating_since = NULL
+                       last_seen_in_sync_at = ?,
+                       resumed_updating_at = CASE WHEN not_updating_since IS NOT NULL THEN ? ELSE resumed_updating_at END,
+                       not_updating_since = NULL
                  WHERE id = ? AND ? >= balance_date
                 """, arguments: [
-                    balance, available, incoming.balanceDate, nowSeconds,
+                    balance, available, incoming.balanceDate, nowSeconds, nowSeconds,
                     rowId, incoming.balanceDate,
                 ])
-            try recordHoldings(incoming, rowId: rowId, db: db)
+            try recordHoldings(incoming, rowId: rowId, dated: false, nowSeconds: nowSeconds, db: db)
             // Even when the balance was too old to write, the account was seen.
             try db.execute(
                 sql: "UPDATE account SET last_seen_in_sync_at = ? WHERE id = ?",
@@ -216,10 +235,19 @@ enum SimpleFINIngest {
     /// an account that genuinely holds none, so an empty one is never taken as a statement. Only a
     /// response that actually lists holdings is allowed to set the count — which means the fact
     /// arrives with the first full transaction pull rather than the first balance check.
-    private static func recordHoldings(_ incoming: SimpleFINAccount, rowId: Int64, db: Database) throws {
-        guard let holdings = incoming.holdings, !holdings.isEmpty else { return }
+    private static func recordHoldings(
+        _ incoming: SimpleFINAccount, rowId: Int64, dated: Bool, nowSeconds: Int64, db: Database
+    ) throws {
+        guard let holdings = incoming.holdings else { return }
+        // An explicit empty key in a dated answer is evidence; the same key on a balance-only
+        // answer is merely the server's placeholder and says nothing about what this account holds.
+        if dated {
+            try db.execute(sql: "UPDATE account SET holdings_observed_at = ? WHERE id = ?",
+                           arguments: [nowSeconds, rowId])
+        }
+        guard !holdings.isEmpty else { return }
         try db.execute(
-            sql: "UPDATE account SET holdings_count = ? WHERE id = ?",
+            sql: "UPDATE account SET holdings_count = ?, guess_class = 'investment' WHERE id = ?",
             arguments: [holdings.count, rowId])
     }
 
@@ -232,7 +260,7 @@ enum SimpleFINIngest {
     /// correction and reset how far back history has been filled in.
     private static func upsertAccount(
         _ incoming: SimpleFINAccount, connection: SimpleFINConnection?, db: Database,
-        nowSeconds: Int64, outcome: inout SyncOutcome
+        nowSeconds: Int64, outcome: inout SyncOutcome, liveConnectionIds: Set<String>
     ) throws -> Int64 {
         let connId = incoming.connId ?? connection?.connId
         let institution = connection.map { $0.name.isEmpty ? ($0.orgName ?? incoming.name) : $0.name }
@@ -254,15 +282,13 @@ enum SimpleFINIngest {
         // row keeps the owner's corrections and their history, where inserting would double every
         // balance for a week and then drop it.
         if let orgId = connection?.orgId {
-            let liveConnIds = Set((try? Account.fetchAll(db))?.compactMap(\.connId) ?? [])
-            _ = liveConnIds
             let candidates = try Account
                 .filter(Column("source") == AccountSource.simplefin.rawValue)
                 .filter(Column("org_id") == orgId)
                 .filter(Column("external_id") == incoming.id)
                 .filter(Column("archived_at") == nil)
                 .fetchAll(db)
-            let stale = candidates.filter { $0.connId != connId }
+            let stale = candidates.filter { $0.connId != connId && !liveConnectionIds.contains($0.connId ?? "") }
             if stale.count == 1, let id = stale[0].id {
                 try db.execute(sql: """
                     UPDATE account SET conn_id = ?, remote_name = ?, conn_name = ?, org_name = ?, currency = ?
@@ -281,16 +307,38 @@ enum SimpleFINIngest {
         account.orgId = connection?.orgId
         account.orgName = connection?.orgName
         account.currency = incoming.currency
-        // The type is not known yet. Milestone 4 guesses it and lets the owner correct it; until
-        // then the engine holds the account out of every total rather than guessing silently.
+        let guess = AccountTypeGuess.guess(
+            remoteName: incoming.name,
+            institutionNames: [connection?.name, connection?.orgName].compactMap { $0 })
         account.userType = nil
-        account.guessedType = nil
+        account.guessedType = guess.type
+        account.guessClass = guess.accountClass?.rawValue
+        account.guessedFromName = guess.fromName
         account.balanceDate = incoming.balanceDate
         account.manualUpdatedAt = nil
         account.createdAt = nowSeconds
         try account.insert(db)
         outcome.accountsInserted += 1
+        if let id = account.id { try flagManualDuplicates(of: incoming.name, syncedId: id, db: db) }
         return account.id ?? 0
+    }
+
+    /// A name match is a question, never an automatic merge. Only one side contributes while the
+    /// owner answers; bills on the manual row remain subtracted by the engine's separate standing.
+    private static func flagManualDuplicates(of name: String, syncedId: Int64, db: Database) throws {
+        let stop: Set<String> = ["checking", "chequing", "saving", "cash", "card", "credit", "account", "my", "the", "bank"]
+        let incoming = Set(AccountTypeGuess.tokens(of: name)).subtracting(stop)
+        guard !incoming.isEmpty else { return }
+        let candidates = try Account.filter(Column("source") == AccountSource.manual.rawValue)
+            .filter(Column("archived_at") == nil)
+            .filter(Column("merge_candidate_for") == nil)
+            .filter(Column("merge_answered_at") == nil).fetchAll(db)
+        for candidate in candidates {
+            let tokens = Set(AccountTypeGuess.tokens(of: candidate.displayName)).subtracting(stop)
+            guard let id = candidate.id, !tokens.isDisjoint(with: incoming) else { continue }
+            try db.execute(sql: "UPDATE account SET merge_candidate_for = ? WHERE id = ?",
+                           arguments: [syncedId, id])
+        }
     }
 
     // MARK: Transactions
@@ -299,6 +347,13 @@ enum SimpleFINIngest {
         _ set: SimpleFINAccountSet, db: Database, window: ClosedRange<CalendarDay>,
         troubled: Set<Int64>, nowSeconds: Int64, outcome: inout SyncOutcome, calendar: Calendar
     ) throws {
+        // An explicit bank/account error is current trouble even when it first arrives in a
+        // dated answer. It cannot clear a balance error, and the history cursor must not pass it.
+        outcome.historyWindowIncomplete = !troubled.isEmpty || set.hasGeneralAuthFailure
+        for id in troubled {
+            try db.execute(sql: "UPDATE account SET not_updating_since = COALESCE(not_updating_since, ?) WHERE id = ?",
+                           arguments: [nowSeconds, id])
+        }
         for incoming in set.accounts {
             let connId = incoming.connId
             // A window may not create an account: it cannot supply a balance date worth trusting.
@@ -311,7 +366,7 @@ enum SimpleFINIngest {
 
             // Holdings usually arrive with a full pull rather than a balance check, so the count is
             // taken from whichever answer actually carries them.
-            try recordHoldings(incoming, rowId: accountId, db: db)
+            try recordHoldings(incoming, rowId: accountId, dated: true, nowSeconds: nowSeconds, db: db)
 
             let rows = incoming.transactions ?? []
             let everyAmountRead = try store(rows, accountId: accountId, db: db, nowSeconds: nowSeconds,
@@ -321,7 +376,11 @@ enum SimpleFINIngest {
             // watermark. An account that errored asks for the same span again next time — and so
             // does one whose answer carried an amount the app could not read, because a charge
             // missing from the number is worse than a window fetched twice.
-            guard !troubled.contains(accountId), everyAmountRead else { continue }
+            guard !troubled.contains(accountId), everyAmountRead else {
+                outcome.historyWindowIncomplete = true
+                continue
+            }
+            outcome.transactionsSeen += rows.count
             let through = window.upperBound.epochSeconds(in: calendar)
             try db.execute(sql: """
                 UPDATE account
