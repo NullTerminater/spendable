@@ -31,7 +31,8 @@ struct SafeToSpendTests {
         currency: String = "USD",
         available: Int64? = nil,
         typeIsGuess: Bool = false,
-        reversed: Bool = false
+        reversed: Bool = false,
+        holdings: Int = 0
     ) -> Account {
         var account = Account.manual(displayName: name, type: type ?? .checking, balanceCents: cents)
         account.id = id
@@ -43,6 +44,7 @@ struct SafeToSpendTests {
         account.includeInSafeToSpend = includeSavings
         account.archivedAt = archived ? asOf.epochSeconds(in: chicago) : nil
         account.amountsReversed = reversed
+        account.holdingsCount = holdings
         if type == nil {
             account.userType = nil
             account.guessedType = nil
@@ -681,5 +683,45 @@ struct SafeToSpendTests {
         #expect(listed == figure.subtractedCents)
         #expect(figure.contributedCents - figure.subtractedCents == figure.remainderCents)
         #expect(figure.remainderCents == 76_800)
+    }
+
+    // MARK: The owner's rule of 15 September 2026 — shares are never spending money
+
+    @Test("an account holding shares is never counted, whatever it is called or typed")
+    func sharesAreNeverSpendable() {
+        let today = Self.day(2026, 9, 16)
+        // The public demo's own savings account: six figures, one holding, and a name that reads
+        // like ordinary savings. A name-based guess alone would have counted it.
+        let portfolio = Self.account(id: 1, "SimpleFIN Savings", .savings, 11_538_551, asOf: today,
+                                     source: .simplefin, includeSavings: true, holdings: 1)
+        let spending = Self.account(id: 2, "Cash", .checking, 40_000, asOf: today)
+
+        let result = SafeToSpendEngine.compute(
+            accounts: [portfolio, spending], charges: [], paySchedule: nil,
+            today: today, calendar: Self.chicago)
+        guard case .figures(let report) = result else { #expect(Bool(false), "no figure"); return }
+
+        let held = try! #require(report.accounts.first { $0.id == 1 })
+        #expect(held.standing == .heldOut(.holdsInvestments))
+        #expect(held.contributedCents == 0)
+        // Opting in is what would have made this dangerous: the switch says "count this", and the
+        // account still must not be counted.
+        #expect(report.month.contributedCents == 40_000)
+    }
+
+    @Test("holdings are decided before the type is, so a share account is never asked about")
+    func holdingsBeatEveryType() {
+        let today = Self.day(2026, 9, 16)
+        for type: AccountType? in [nil, .credit, .checking, .savings] {
+            let account = Self.account(id: 1, "Fidelity Cash Management", type, 1_841_266, asOf: today,
+                                       source: .simplefin, includeSavings: true, holdings: 3)
+            let classified = SafeToSpendEngine.classify(account, today: today, calendar: Self.chicago)
+            // Not `.typeNotSet` — that would put the four-way type question on a share portfolio,
+            // and its "credit" answer prints "You owe $18,412.66" about money nobody owes. Not
+            // `.creditCard` either, for the same reason.
+            #expect(classified.standing == .heldOut(.holdsInvestments),
+                    "holdings lost to type \(String(describing: type))")
+            #expect(classified.contributedCents == 0)
+        }
     }
 }
