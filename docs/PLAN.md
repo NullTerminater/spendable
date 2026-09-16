@@ -15,6 +15,15 @@ Answers to the questions in section 1 below, applied throughout the build:
 9. **Generated project:** the `.xcodeproj` is not committed; `scripts/bootstrap.sh` regenerates it from `project.yml`.
 10. **Sandbox:** main app not sandboxed.
 
+**Rule 11, added by the owner on 2026-09-15.** Safe is always better than faster. An account that
+holds shares or funds is **never** counted towards what can be spent, and the app never offers a
+switch to change that. The owner's words: they have no shares, probably never will, and if they ever
+do they will treat them as savings rather than spending money. So a `checking` or `cash` *guess* on
+an account the app has not yet looked inside does not count until it has fetched that account's
+transactions and knows whether it holds money or shares — normally the same sync, occasionally up to
+a day. Holding an ordinary current account out for a few minutes is the cheap mistake; putting a
+share portfolio into this month's spending money is the expensive one.
+
 **Additional rule from the owner:** a negative safe-to-spend is never shown as a negative headline. It reads "Safe to spend: $0 (balance: −$120)" — the headline is $0 and the true figure follows in parentheses. The until-payday figure follows the same rule and its per-day allowance becomes $0. The disclosure still explains the shortfall in a sentence ("You're $120 short of this month's bills"). Wherever the text below says a negative figure is "never clamped", this rule wins.
 
 ---
