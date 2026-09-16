@@ -260,7 +260,10 @@ On first connection the app walks backwards in **44-day windows with a 5-day ove
 first, sending both dates every time, as UTC midnight. Each window steps back thirty-nine days, so
 eleven of them cover the thirteen months the app is willing to look — the eleventh reaching a little
 over fourteen months back, because a window that crosses the boundary is still asked for whole. It
-stops at whichever comes first: two consecutive windows with nothing new, or the end of that list.
+stops at whichever comes first: two consecutive successful windows with no transactions returned,
+or the end of that list. A replay containing transaction ids already stored locally is not empty.
+An account or connection error, or an unreadable transaction amount, leaves the window incomplete:
+its cursor stays put and the next run asks for that same span again.
 (The planner's `limit: 12` is a guard rather than a stop rule; the thirteen-month reach always ends
 the walk first.)
 
