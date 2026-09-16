@@ -77,15 +77,26 @@ enum DebugLaunchOptions {
             return
         }
 
+        try? await database.writer.write { db in
+            try SyncState.setDate(db, SyncState.connectedAt, Date())
+        }
         let coordinator = SyncCoordinator(database: database, client: client, credentials: store)
-        let report = await coordinator.sync(reason: .firstConnection)
-        let line = "demo sync: \(report.requestsSpent) requests, \(report.windowsFetched) windows, "
-            + "\(report.outcome.accountsInserted) accounts added, \(report.outcome.transactionsInserted) transactions, "
-            + "\(report.outcome.transactionsMatchedByContent) matched by content, "
-            + (report.failure.map { "failure: \($0.ownerFacingMessage)" }
-               ?? report.refusal.map { "refused: \($0.ownerFacingMessage)" }
-               ?? report.credentialProblem
-               ?? "ok")
+        let report = await coordinator.sync(shape: .balancesAndTransactions)
+        var verdict = "ok"
+        if let problem = report.credentialProblem {
+            verdict = problem
+        } else if let failure = report.failure {
+            verdict = "failure: " + failure.ownerFacingMessage
+        } else if let refusal = report.refusal {
+            verdict = "paused: " + refusal.ownerFacingMessage
+        }
+        if report.stillFillingHistory { verdict += " [still filling history]" }
+
+        let counts = "\(report.requestsSpent) requests, \(report.windowsFetched) windows, "
+            + "\(report.outcome.accountsInserted) accounts added, "
+            + "\(report.outcome.transactionsInserted) transactions, "
+            + "\(report.outcome.transactionsMatchedByContent) matched by content"
+        let line = "demo sync: " + counts + ", " + verdict
         log.notice("\(line, privacy: .public)")
         DebugMeasurementLog.append(line)
     }

@@ -189,6 +189,8 @@ struct AccountRow: View {
             return "Not counted until you say what kind of account this is."
         case .heldOut(.notUSDollars):
             return "Not in US dollars, so it isn't counted."
+        case .heldOut(.holdsInvestments):
+            return "Holds investments, not money. Not counted towards what you can spend."
         case .creditCard:
             return "Money you owe, never counted as money you have. As of \(day)."
         case .archived:
