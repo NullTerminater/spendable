@@ -4,7 +4,7 @@ A private, single-user macOS menu bar app that answers one question: **how much 
 
 It reads bank balances and transactions through a SimpleFIN Bridge subscription (read-only), keeps everything in a local SQLite database on this Mac, and shows the answer in the menu bar, a main window, and a desktop widget. No cloud, no telemetry, no accounts. It never moves money.
 
-This repository is private and stays that way. Nothing that touches money is ever committed: no tokens, no access URLs, no real balances or transactions. See `CLAUDE.md` for the rules and `docs/PLAN.md` for the plan and every decision behind it.
+This repository is private and stays that way. Nothing that touches money is ever committed: no tokens, no access URLs, no real balances or transactions. `CLAUDE.md` holds the rules; `docs/PLAN.md` the plan and every decision; `docs/HANDOFF.md` where the project actually is; `docs/ENGINE.md` and `docs/SYNC.md` the contracts for the shipped engine and sync; `docs/CONNECTING.md` the milestone 4 design, corrected by `docs/reviews/milestone-4-review.md`, which wins wherever the two disagree.
 
 ## Setup
 
@@ -14,6 +14,23 @@ open Spendable.xcodeproj      # or build from the command line, see CLAUDE.md
 ```
 
 Requirements: macOS 15+, Xcode 26, `xcodegen` (`brew install xcodegen`). Signing uses the free Personal Team already registered in Xcode.
+
+Build and test with `-derivedDataPath DerivedData`, which every command below assumes:
+
+```bash
+xcodebuild -project Spendable.xcodeproj -scheme Spendable -configuration Debug -derivedDataPath DerivedData -allowProvisioningUpdates build
+```
+
+## Where this is
+
+Milestones 1, 2 and 3 are built, measured and tagged (`v0.1-skeleton`, `v0.2-engine`,
+`v0.3-simplefin`). Milestone 4 — real-token setup, account types, staleness display and the sync
+scheduler — is **half built**: the account-type guesser, the `sync_state` keys and sync policy, the
+single-flight sync coordinator and the rule that an account holding shares is never spendable are
+all in `main`; the v4 migration, the setup screen, the two credential banners and the scheduler
+itself are not. 188 tests pass in 20 suites. `docs/HANDOFF.md` lists what remains, in order, and
+`docs/reviews/milestone-4-review.md` is the rule set it has to follow. There is no v0.4 tag yet, so
+the table below stops at milestone 3.
 
 ## Measured numbers
 
@@ -46,23 +63,19 @@ open Spendable.xcodeproj        # Run the Spendable scheme
 
 Milestone 1: a coin icon appears in the menu bar. Open Spendable from it, add an account by hand (name, kind, balance), quit and reopen, and it is still there. Edit an account by double-clicking it. Nothing is calculated yet.
 
-Milestone 3 is the bank connection, and has no screen of its own yet — milestone 4 adds the setup
-screen where a real token is pasted. To watch the whole path run against SimpleFIN's public demo,
-which claims a fresh single-use token, stores it under a **separate** keychain item from any real
-connection, and syncs:
-
-```bash
-SPENDABLE_DEBUG_CONTAINER=/tmp/spendable-demo scripts/../DerivedData/Build/Products/Debug/Spendable.app/Contents/MacOS/Spendable
-```
-
-or, the way the milestone was checked:
+Milestone 3 is the bank connection, and has no screen of its own — milestone 4 adds the setup screen
+where a real token is pasted. To watch the whole path run against SimpleFIN's public demo — it
+claims a fresh single-use token, stores it under a **separate** keychain item (`access-demo`) from
+any real connection, and syncs:
 
 ```bash
 open --env SPENDABLE_DEBUG_CONTAINER=/tmp/spendable-demo --env SPENDABLE_DEBUG_CONNECT_DEMO=1 DerivedData/Build/Products/Debug/Spendable.app
 ```
 
-It writes what it did to `measurements.log` in that container. `docs/SYNC.md` is the contract every
-rule follows.
+Both variables are required: `SPENDABLE_DEBUG_CONNECT_DEMO=1` is what triggers the claim and the
+sync, and the app refuses to run it unless `SPENDABLE_DEBUG_CONTAINER` is also set, so it can never
+touch the real container. It writes what it did to `/tmp/spendable-demo/measurements.log`.
+`docs/SYNC.md` is the contract every rule follows.
 
 Milestone 2: the window has three screens. **Accounts** is milestone 1, plus a tick box on savings to count it. **Bills** is where you add your rent and anything that comes out automatically, with a monthly total at the top and an "I've paid this" action on each row. **What you can spend** is the answer: a number, and under "How is this worked out?" the whole sum in sentences. Set a payday and a second figure appears, covering only the days until you are next paid, with the bills that fall after it named rather than hidden. `docs/ENGINE.md` is the contract every one of those rules follows.
 
@@ -86,5 +99,6 @@ Sources/SpendableWidget/  the WidgetKit extension (reads a summary file, never t
 Tests/SpendableTests/  unit tests (in-memory databases only)
 Tests/Fixtures/        public demo snapshots and synthetic data, nothing real
 scripts/               bootstrap and measurement scripts
-docs/                  plan and decisions
+docs/                  PLAN, HANDOFF, and the ENGINE / SYNC / CONNECTING contracts
+docs/reviews/          the three design reviews, verbatim; the milestone 4 one is authoritative
 ```

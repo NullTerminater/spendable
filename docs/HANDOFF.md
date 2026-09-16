@@ -1,9 +1,12 @@
 # Where this project is
 
-Written 15 September 2026, at the point milestone 4 was half built. Anyone picking this up — a
-person or another session — should be able to carry on from here without re-deriving anything.
+Written 15 September 2026, at the point milestone 4 was half built; brought up to date on
+16 September after every claim in every document was checked against the code. Anyone picking this
+up — a person or another session — should be able to carry on from here without re-deriving
+anything.
 
 The plan and every decision the owner has made is `docs/PLAN.md`. Read that first if you have not.
+`CLAUDE.md` names all six documents and the three reviews, and which of them have been superseded.
 
 ## State at a glance
 
@@ -19,16 +22,20 @@ The plan and every decision the owner has made is `docs/PLAN.md`. Read that firs
 | 8. WidgetKit extension over a summary file | Not started (a throwaway stub exists from milestone 1) | — |
 | 9. Settings, re-claim, diagnostics, final performance pass | Not started | — |
 
-182 tests pass and `main` is pushed to the private remote, including the half of milestone 4 that is
+188 tests pass and `main` is pushed to the private remote, including the half of milestone 4 that is
 built. Nothing is sitting uncommitted.
 
 ## How to verify what is done
 
 ```bash
 scripts/bootstrap.sh
-xcodebuild -project Spendable.xcodeproj -scheme Spendable -configuration Debug -allowProvisioningUpdates build
-xcodebuild -project Spendable.xcodeproj -scheme Spendable -destination 'platform=macOS' test
+xcodebuild -project Spendable.xcodeproj -scheme Spendable -configuration Debug -derivedDataPath DerivedData -allowProvisioningUpdates build
+xcodebuild -project Spendable.xcodeproj -scheme Spendable -destination 'platform=macOS' -derivedDataPath DerivedData test
 ```
+
+`-derivedDataPath DerivedData` is not optional: the measurement scripts and the demo command below
+all look for the app at `DerivedData/Build/Products/Debug/Spendable.app`, and without the flag they
+either refuse to run or measure an older binary.
 
 Milestones 1 and 2 are visible in the app: run it, open the window from the menu bar icon, add an
 account and a bill. Milestone 3 has no screen of its own; drive it against SimpleFIN's public demo:
@@ -68,18 +75,20 @@ this handoff. Nothing is blocked on a decision or a problem — it stopped mid-i
 
 `docs/CONNECTING.md` is the design. It was then attacked by four independent readers before
 implementation, the same practice used for milestones 2 and 3. That review is
-**`docs/reviews/milestone-4-review.md`**: 31 findings, 27 decisions, 25 test cases, kept verbatim.
+**`docs/reviews/milestone-4-review.md`**: 27 decisions, 8 findings rejected and 25 test cases, kept
+verbatim.
 
 **Read that file before writing any more milestone 4 code.** It contains the complete final rule
 set — the guesser's algorithm and word lists, the exact sentences the owner reads, the scheduler
-contract — and several of its decisions are not things anyone would arrive at unaided. Note that
-`docs/CONNECTING.md` has **not** been rewritten to match the review yet; where the two disagree, the
-review wins.
+contract — and several of its decisions are not things anyone would arrive at unaided.
+`docs/CONNECTING.md` was rewritten on 16 September to carry the review's rules in place of the nine
+it overruled, so it can be read on its own again; the review is still the authority, and it holds
+the word lists and worked test cases CONNECTING deliberately does not repeat.
 
 The reviews for milestones 2 and 3 are in the same folder. They were rescued from a session
 scratchpad that was about to be deleted; they explain why several shipped rules look odd.
 
-## Built, working, tested — but not committed
+## Built, working, tested and committed
 
 - **`Sources/Spendable/SimpleFIN/AccountTypeGuess.swift`** — the account-type guesser, complete and
   matching the review's specified algorithm: normalise, strip the bank's own name, match whole words
@@ -92,20 +101,33 @@ scratchpad that was about to be deleted; they explain why several shipped rules 
   need (`balances-synced-at`, `transactions-pulled-at`, `sync-attempted-at`,
   `sync-failures-in-a-row`, `connected-at`), plus `SyncShape` and `SyncPolicy`, a pure decision about
   whether to sync and what to ask for. `Tests/SpendableTests/SyncPolicyTests.swift` covers it.
-- **`Sources/Spendable/SimpleFIN/SyncCoordinator.swift`** — rewritten. Three of the review's blocking
-  findings are fixed here:
+- **`Sources/Spendable/SimpleFIN/SyncCoordinator.swift`** — rewritten. Three mechanisms the review's
+  blocking findings depend on are fixed inside this file, and one of those findings is only half
+  done:
   - a real single-flight `Task`, because an actor serialises statements rather than whole operations,
     so two triggers would each have got past the budget check at a different `await` and each spent a
-    request;
+    request. **The decision this serves, `one-coordinator-one-scheduler`, is not finished:**
+    `AppModel` still has no `syncCoordinator` property and `DebugLaunchOptions` still constructs its
+    own instance, and two instances share no single-flight state. See item 9 under "Not built yet";
   - `SyncShape`, so transactions are actually fetched again after the first history walk ends. The
     old code declared a `reason` parameter and never read it, which meant no transaction would ever
     have been fetched again;
   - a report that distinguishes "still filling in history" from a failure, because every first
-    connection ends on a budget refusal by design and the old code called that an error.
+    connection ends on a budget refusal by design and the old code called that an error. A window
+    that *failed* mid-walk used to report the walk as finished; that is fixed. Still outstanding in
+    this file, from `history-progress-says-a-date-not-a-fraction`: `SyncReport` lacks
+    `enum HistoryStop { case noMoreHistory, reachedThirteenMonths, budget, failed }` and
+    `historyStopped`, so "that's as far as your bank goes" cannot be told from "I'll carry on
+    tomorrow". Item 6 below owns the screen wording; this one is a coordinator change.
 - **The investments rule in the engine** — an account the bank reports holdings for is held out of
-  every total whatever it is called and whatever the owner opts into, with wording in
-  `SafeToSpendNarrative`, `MainWindowView` and `OverviewView`. This came out of milestone 3's review:
-  the demo's own savings account holds six figures of Apple stock and is called "SimpleFIN Savings".
+  every total whatever it is called, whatever type it is given and whatever the owner opts into, with
+  wording in `SafeToSpendNarrative`, `MainWindowView` and `OverviewView`. This came out of milestone
+  3's review: the demo's own savings account holds six figures of Apple stock and is called
+  "SimpleFIN Savings". Holdings are now tested **before** the type and before credit, so an untyped
+  share account is never offered the four-way type picker whose "credit" answer would print "You owe
+  $128,400" about a portfolio. Two tests pin it, one of them over every type an account can be
+  given. The remaining order work — `loan`, `superseded-pending-answer` and
+  `not-looked-inside-yet` — is item 4 under "Not built yet".
 
 ## Not built yet
 
@@ -126,9 +148,12 @@ In the order I would do them. Each item names the decision in
    "…CASH MANAGEMENT" entering the headline as spendable money. The coordinator must also carry on
    into `fetchTransactions` in the same run when `outcome.accountsInserted > 0`, so that normally
    resolves within minutes.
-4. **Engine classification order** (same decision, last paragraph). Pin it: archived →
+4. **Engine classification order** (same decision, last paragraph). The final order is archived →
    superseded-pending-answer → currency → loan → investments → not-looked-inside-yet → no type →
-   credit → savings opt-in → not updating → age.
+   credit → savings opt-in → not updating → age. Investments already sits above "no type" and above
+   credit, which is the half that matters for the owner's rule 11; the three steps still missing are
+   `loan`, `superseded-pending-answer` (item 10) and `not-looked-inside-yet` (item 3), and each
+   needs its own `HeldOutReason` or standing.
 5. **What a guess may do to the number** (`what-a-guess-may-do-to-the-number`). Per-outcome
    permissions and the exact row sentences.
 6. **The setup screen** (`the-paste-field`, `nothing-is-written-before-the-keychain-write-verifies`,
@@ -216,10 +241,17 @@ Do not rediscover these.
 ## The practice that has been worth the most
 
 Write the contract as a document first, have it attacked by several independent readers, then
-implement. It found 42 problems in milestone 2's engine design, 40 in milestone 3's sync design and
-31 in milestone 4's — including, in each case, at least one rule that would have silently produced a
-wrong number about the owner's money. `docs/ENGINE.md`, `docs/SYNC.md` and `docs/CONNECTING.md` are
-those contracts; `docs/reviews/` holds what came back.
+implement. It found 42 problems in milestone 2's engine design, 40 in milestone 3's sync design, and
+in milestone 4's design 27 decisions and 8 rejections — including, in each case, at least one rule
+that would have silently produced a wrong number about the owner's money. `docs/ENGINE.md`,
+`docs/SYNC.md` and `docs/CONNECTING.md` are those contracts; `docs/reviews/` holds what came back.
+
+The same practice run over the **documents** on 16 September, checking every factual claim against
+the shipped code, returned 105 findings and seven real code defects — among them a shortfall
+sentence printed on payday morning, a transaction amount silently dropped while its watermark
+advanced past it, and a keychain error that told the owner to retry a read when a write had failed.
+A document that contradicts the code is worse than a missing one, because it will be believed. It is
+worth re-running before each tag.
 
 Do the same for milestone 5 (subscription detection) and milestone 6 (credit cards). Both are full
 of the same kind of quiet arithmetic error.
