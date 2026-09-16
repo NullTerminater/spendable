@@ -127,6 +127,8 @@ enum SafeToSpendNarrative {
             head = "\(balance) in \(block.accountName) isn't counted until you tell me what kind of account it is."
         case .notUSDollars:
             head = "\(block.accountName) isn't in US dollars, so it isn't counted."
+        case .holdsInvestments:
+            head = "\(block.accountName) holds investments rather than money, so it isn't counted. What it's worth moves with the market, and it isn't there to spend this month."
         }
         guard block.obligationsCents > 0 else { return head }
         let owed = Cents.format(block.obligationsCents, locale: locale)
@@ -288,6 +290,7 @@ enum SafeToSpendNarrative {
             case .savingsNotCounted: why = "which isn't counted here"
             case .typeNotSet: why = "which isn't counted until you tell me what kind of account it is"
             case .notUSDollars: why = "which isn't in US dollars and isn't counted"
+            case .holdsInvestments: why = "which holds investments rather than money"
             }
             return "\(obligation.name) \(amount) comes out of \(accountName), \(why)"
         case .onCardWithStatement(let cardName):

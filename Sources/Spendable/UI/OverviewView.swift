@@ -67,6 +67,8 @@ struct OverviewView: View {
             return "\(account.name) holds \(amount) in savings, which you haven't asked me to count."
         case .heldOut(.notUSDollars):
             return "\(account.name) isn't in US dollars, so I can't count it."
+        case .heldOut(.holdsInvestments):
+            return "\(account.name) holds investments worth \(amount), which isn't money I can count as spendable."
         case .creditCard:
             return "\(account.name) is a card, so what's on it is money you owe, not money you have."
         case .archived, .counted:

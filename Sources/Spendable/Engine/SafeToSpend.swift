@@ -26,6 +26,10 @@ enum HeldOutReason: Equatable, Sendable {
     case typeNotSet
     /// Not in US dollars.
     case notUSDollars
+    /// The bank reports holdings against it, so its balance is a market value rather than money.
+    /// It is held out whatever it is called and whatever the owner opts into: a share portfolio
+    /// that moves with the market is not money to spend this month.
+    case holdsInvestments
 }
 
 enum AccountStanding: Equatable, Sendable {
@@ -312,6 +316,8 @@ enum SafeToSpendEngine {
             standing = .heldOut(.typeNotSet)
         } else if type == .credit {
             standing = .creditCard
+        } else if account.holdingsCount > 0 {
+            standing = .heldOut(.holdsInvestments)
         } else if type == .savings && account.includeInSafeToSpend != true {
             standing = .heldOut(.savingsNotCounted)
         } else if account.notUpdatingSince != nil {
