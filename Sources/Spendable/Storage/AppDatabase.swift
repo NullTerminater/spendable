@@ -43,6 +43,7 @@ final class AppDatabase: Sendable {
         "v1",
         "v2-recurring-anchor-destination-and-paid",
         "v3-sync-bookkeeping",
+        "v4-account-type-guess",
     ]
 
     static var migrator: DatabaseMigrator {
@@ -85,6 +86,14 @@ final class AppDatabase: Sendable {
             try db.execute(sql: "ALTER TABLE account ADD COLUMN not_updating_since INTEGER")
             // Why a pending row stopped counting, so the reason survives in the history.
             try db.execute(sql: "ALTER TABLE bank_transaction ADD COLUMN voided_reason TEXT")
+        }
+        migrator.registerMigration("v4-account-type-guess") { db in
+            try db.execute(sql: "ALTER TABLE account ADD COLUMN guessed_from_name TEXT")
+            try db.execute(sql: "ALTER TABLE account ADD COLUMN guess_class TEXT CHECK (guess_class IS NULL OR guess_class IN ('investment','loan'))")
+            try db.execute(sql: "ALTER TABLE account ADD COLUMN holdings_observed_at INTEGER")
+            try db.execute(sql: "ALTER TABLE account ADD COLUMN resumed_updating_at INTEGER")
+            try db.execute(sql: "ALTER TABLE account ADD COLUMN merge_candidate_for INTEGER REFERENCES account(id) ON DELETE SET NULL")
+            try db.execute(sql: "ALTER TABLE account ADD COLUMN merge_answered_at INTEGER")
         }
         return migrator
     }

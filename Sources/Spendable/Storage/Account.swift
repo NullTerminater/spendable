@@ -78,6 +78,13 @@ struct Account: Codable, Sendable, Identifiable, Equatable, FetchableRecord, Mut
     /// said something was wrong with it. Set the moment it happens, not after its balance ages.
     var notUpdatingSince: Int64?
     var createdAt: Int64
+    /// Facts recorded once when a synced row first arrives. Renames never silently re-type it.
+    var guessedFromName: String? = nil
+    var guessClass: String? = nil
+    var holdingsObservedAt: Int64? = nil
+    var resumedUpdatingAt: Int64? = nil
+    var mergeCandidateFor: Int64? = nil
+    var mergeAnsweredAt: Int64? = nil
 
     mutating func didInsert(_ inserted: InsertionSuccess) {
         id = inserted.rowID

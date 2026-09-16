@@ -124,9 +124,10 @@ struct SimpleFINIngestTests {
         // The connection's own name, not org_name, which on the demo reads "SimpleFIN Bridge" and
         // would tell the owner nothing about which login to fix.
         #expect(checking.connName == "SimpleFIN Demo")
-        // No type is guessed here. Milestone 4 does that, and until then the engine holds the
-        // account out of every total rather than deciding silently.
-        #expect(checking.effectiveType == nil)
+        // The name supplies a guess, but only a dated answer can establish holdings evidence.
+        #expect(checking.effectiveType == .checking)
+        #expect(checking.userType == nil)
+        #expect(checking.holdingsObservedAt == nil)
         // A balances-only answer returns an empty holdings array for every account, which is the
         // same shape as an account that genuinely holds none. So the count stays at zero until a
         // full pull actually lists them — an empty array is never read as a statement.
