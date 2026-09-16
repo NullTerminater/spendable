@@ -157,11 +157,14 @@ struct AccountRow: View {
         .accessibilityElement(children: .combine)
     }
 
+    /// The account's own currency, not the app's. A balance the engine refuses to count because it
+    /// is not in US dollars must not be shown with a dollar sign: the owner's reasonable next move
+    /// on reading "$2,400.00 — not in US dollars, so it isn't counted" is to type $2,400 in by hand.
     private var balanceSentence: String {
         if account.effectiveType == .credit {
-            return "You owe \(Cents.format(Int64(clamping: account.balanceCents.magnitude)))"
+            return "You owe \(Cents.format(Int64(clamping: account.balanceCents.magnitude), currency: account.currency))"
         }
-        return Cents.format(account.balanceCents)
+        return Cents.format(account.balanceCents, currency: account.currency)
     }
 
     private var isHeldOut: Bool {

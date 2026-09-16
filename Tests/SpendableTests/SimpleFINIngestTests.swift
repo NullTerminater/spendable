@@ -219,6 +219,36 @@ struct SimpleFINIngestTests {
         #expect(savings.holdingsCount == 1)
     }
 
+    @Test("an amount the app cannot read is never stepped over in silence")
+    func unreadableAmountKeepsTheWindowOpen() throws {
+        let database = try AppDatabase.inMemory()
+        let accountId = try database.writer.write { db in try Self.seedAccount(db) }
+        // Two charges, one of them in a shape the exact-cents parser refuses. The readable one must
+        // still be stored, and the window must not be marked as covered — a charge missing from the
+        // number is worse than a window fetched twice.
+        let answer = try Self.set("""
+            {"errlist": [], "accounts": [{
+              "org": {"domain": "beta-bridge.simplefin.org", "sfin-url": "https://beta-bridge.simplefin.org/simplefin"},
+              "id": "Demo Checking", "conn_id": "CON-SIMPLEFIN-DEMO",
+              "name": "SimpleFIN Checking", "currency": "USD",
+              "balance": "25951.11", "available-balance": "25951.11", "balance-date": 1789516800,
+              "transactions": [
+                {"id": "T-OK", "posted": 1789516800, "amount": "-64.00", "description": "WHOLEFOODS"},
+                {"id": "T-BAD", "posted": 1789516800, "amount": "-1.2e3", "description": "MYSTERY"}
+              ]}]}
+            """)
+        let outcome = try database.writer.write { db in
+            try SimpleFINIngest.ingest(
+                answer, kind: .window(start: Self.day(2026, 8, 2), end: Self.day(2026, 9, 14)),
+                into: db, now: Date(timeIntervalSince1970: 1_789_600_000), calendar: Self.chicago)
+        }
+
+        #expect(outcome.transactionsInserted == 1)
+        #expect(outcome.notices.contains { $0.scope == .account(accountId) && $0.code == "app.amount" })
+        let account = try #require(try database.reader.read { db in try Account.fetchOne(db) })
+        #expect(account.txSyncedThrough == nil, "the window was marked covered though a charge was lost")
+    }
+
     @Test("a window will not invent an account it has no trustworthy balance for")
     func windowDoesNotCreateAccounts() throws {
         let database = try AppDatabase.inMemory()

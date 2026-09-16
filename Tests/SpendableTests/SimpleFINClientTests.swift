@@ -362,14 +362,30 @@ struct SimpleFINClientTests {
 
     @Test("a locked keychain is never mistaken for a bank rejecting the connection")
     func keychainRefusalIsItsOwnState() {
-        let refused = CredentialStoreError.keychain(errSecInteractionNotAllowed)
+        let refused = CredentialStoreError.keychain(errSecInteractionNotAllowed, while: .reading)
         #expect(refused.isRefusalRatherThanAbsence)
         #expect(refused.ownerFacingMessage.contains("Unlock your login keychain"))
         #expect(!refused.ownerFacingMessage.lowercased().contains("setup token"))
 
-        #expect(!CredentialStoreError.keychain(errSecItemNotFound).isRefusalRatherThanAbsence)
-        #expect(CredentialStoreError.keychain(errSecAuthFailed).isRefusalRatherThanAbsence)
-        #expect(CredentialStoreError.keychain(errSecUserCanceled).isRefusalRatherThanAbsence)
+        #expect(!CredentialStoreError.keychain(errSecItemNotFound, while: .reading).isRefusalRatherThanAbsence)
+        #expect(CredentialStoreError.keychain(errSecAuthFailed, while: .reading).isRefusalRatherThanAbsence)
+        #expect(CredentialStoreError.keychain(errSecUserCanceled, while: .writing).isRefusalRatherThanAbsence)
+    }
+
+    @Test("a keychain that refuses a save says so, and never tells the owner to retry a read")
+    func keychainRefusalNamesWhichWayItFailed() {
+        // The owner has just spent a single-use setup token. "Try again" after a failed *save*
+        // means try again with the token still in the field — which the server has already burned,
+        // and the 403 that comes back reads as someone else having stolen it.
+        let write = CredentialStoreError.keychain(errSecInteractionNotAllowed, while: .writing)
+        #expect(write.isRefusalRatherThanAbsence)
+        #expect(write.ownerFacingMessage.contains("save the connection"))
+        #expect(!write.ownerFacingMessage.contains("read your saved connection"))
+        #expect(write.ownerFacingMessage.contains("Unlock your login keychain"))
+
+        let read = CredentialStoreError.keychain(errSecUserCanceled, while: .reading)
+        #expect(read.ownerFacingMessage.contains("read your saved connection"))
+        #expect(!read.ownerFacingMessage.contains("save the connection"))
     }
 
     @Test("the demo connection is a different keychain item from the real one")

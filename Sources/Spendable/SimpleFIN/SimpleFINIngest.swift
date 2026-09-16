@@ -314,12 +314,14 @@ enum SimpleFINIngest {
             try recordHoldings(incoming, rowId: accountId, db: db)
 
             let rows = incoming.transactions ?? []
-            try store(rows, accountId: accountId, db: db, nowSeconds: nowSeconds,
-                      outcome: &outcome, calendar: calendar)
+            let everyAmountRead = try store(rows, accountId: accountId, db: db, nowSeconds: nowSeconds,
+                                            outcome: &outcome, calendar: calendar)
 
             // Only an account the server answered for, with nothing wrong with it, may move its
-            // watermark. An account that errored asks for the same span again next time.
-            guard !troubled.contains(accountId) else { continue }
+            // watermark. An account that errored asks for the same span again next time — and so
+            // does one whose answer carried an amount the app could not read, because a charge
+            // missing from the number is worse than a window fetched twice.
+            guard !troubled.contains(accountId), everyAmountRead else { continue }
             let through = window.upperBound.epochSeconds(in: calendar)
             try db.execute(sql: """
                 UPDATE account
@@ -332,10 +334,16 @@ enum SimpleFINIngest {
     }
 
     /// Stores one account's transactions, and reconciles what was pending.
+    ///
+    /// Answers false when a row's amount could not be read. The rows it could read are still
+    /// stored — a charge arriving twice is handled, a charge arriving never is not — but the caller
+    /// leaves the watermark where it was, so the span is asked for again instead of the missing
+    /// charge being written off in silence.
+    @discardableResult
     static func store(
         _ rows: [SimpleFINTransaction], accountId: Int64, db: Database, nowSeconds: Int64,
         outcome: inout SyncOutcome, calendar: Calendar
-    ) throws {
+    ) throws -> Bool {
         let idsInThisResponse = Set(rows.map(\.id))
         /// Amount, day and description together: what makes two lines the same charge to a reader.
         struct Signature: Hashable {
@@ -345,9 +353,20 @@ enum SimpleFINIngest {
         }
         var unknown: [Signature: [(row: SimpleFINTransaction, amount: Int64, effective: Int64)]] = [:]
 
+        var everyAmountRead = true
         for row in rows {
             let amount: Int64
-            do { amount = try Cents.parse(row.amount) } catch { continue }
+            do { amount = try Cents.parse(row.amount) } catch {
+                // One notice for the account, however many rows in this answer are unreadable.
+                if everyAmountRead {
+                    outcome.notices.append(SyncNotice(
+                        scope: .account(accountId),
+                        text: "SimpleFIN sent an amount I couldn't read, so at least one charge on this account is missing. I'll ask for it again.",
+                        code: "app.amount"))
+                }
+                everyAmountRead = false
+                continue
+            }
             let effective = effectiveDate(row, nowSeconds: nowSeconds)
 
             // The fast path: the id the app already knows.
@@ -417,6 +436,7 @@ enum SimpleFINIngest {
 
         try reconcilePending(db: db, accountId: accountId, idsInThisResponse: idsInThisResponse,
                              nowSeconds: nowSeconds, outcome: &outcome, calendar: calendar)
+        return everyAmountRead
     }
 
     /// Holds that have settled, and holds that never will.

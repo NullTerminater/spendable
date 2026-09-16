@@ -46,7 +46,9 @@ struct OverviewView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("I can't work this out right now.")
                 .font(.system(size: 30, weight: .semibold))
-            ForEach(accounts) { account in
+            // An account that has been put away is never named under the number and never raises a
+            // warning — including here, where it would be the one line with no explanation attached.
+            ForEach(accounts.filter { $0.standing != .archived }) { account in
                 Text(cannotWorkOutLine(account))
                     .font(.title3)
                     .foregroundStyle(.secondary)

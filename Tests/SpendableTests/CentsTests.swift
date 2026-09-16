@@ -73,4 +73,17 @@ struct CentsTests {
             #expect(try Cents.parse(text) == cents)
         }
     }
+
+    @Test("a balance that is not in US dollars is not shown with a plain dollar sign")
+    func formatsTheAccountsOwnCurrency() {
+        let us = Locale(identifier: "en_US")
+        #expect(Cents.format(240_000, locale: us) == "$2,400.00")
+        #expect(Cents.format(240_000, locale: us, currency: "CAD") != "$2,400.00")
+        #expect(Cents.format(240_000, locale: us, currency: "CAD").contains("2,400.00"))
+        #expect(Cents.format(240_000, locale: us, currency: "EUR").contains("€"))
+        // A code the formatter would not recognise must fall back to US dollars rather than to
+        // whatever currency the owner's locale happens to use.
+        #expect(Cents.format(240_000, locale: us, currency: "") == "$2,400.00")
+        #expect(Cents.format(240_000, locale: us, currency: "cad") == Cents.format(240_000, locale: us, currency: "CAD"))
+    }
 }

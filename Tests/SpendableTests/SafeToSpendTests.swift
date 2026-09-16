@@ -542,7 +542,23 @@ struct SafeToSpendTests {
         #expect(payday.remainderCents == -111_200)
         #expect(payday.payPending)
         #expect(SafeToSpendDisplay.headline(payday.remainderCents, locale: Self.us) == "$0 (balance: -$1,112)")
-        #expect(Self.text(report, payday).contains("isn't in these balances yet"))
+        let words = Self.text(report, payday)
+        #expect(words.contains("isn't in these balances yet"))
+        // The cause replaces the shortfall sentence rather than sitting beside it. Telling someone
+        // they are short when their wages have simply not landed in the app yet is the false alarm
+        // the whole design is against.
+        #expect(!words.contains("short of the bills due before"))
+        #expect(!words.contains("short of this month's bills"))
+        #expect(words.contains("Counted without it"))
+    }
+
+    @Test("with no pending pay, being short is still said plainly")
+    func shortfallStillSaidWhenPayIsNotPending() {
+        let chase = Self.account(id: 1, "Chase Checking", .checking, 127_940, asOf: Self.day(2026, 9, 14))
+        let rent = Self.bill(id: 1, "Rent", 140_000, due: Self.day(2026, 9, 1), paying: 1)
+        let report = Self.report(accounts: [chase], charges: [rent], anchor: Self.day(2026, 9, 11), today: Self.day(2026, 9, 14))
+        #expect(report.month.payPending == false)
+        #expect(Self.text(report, report.month).contains("short of this month's bills"))
     }
 
     @Test("pay is not reported as pending once a balance from payday or later arrives")
