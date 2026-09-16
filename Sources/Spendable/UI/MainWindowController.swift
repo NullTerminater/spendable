@@ -41,6 +41,17 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         NSApp.activate()
     }
 
+    static func protectSetupWindow(_ protect: Bool) {
+        current?.window?.sharingType = protect ? .none : .readOnly
+        current?.window?.isRestorable = false
+    }
+
+    static func clearSetupField() {
+        guard let window = current?.window else { return }
+        window.fieldEditor(false, for: nil)?.undoManager?.removeAllActions()
+        window.makeFirstResponder(nil)
+    }
+
     /// True while a main window exists. Used by measurements to confirm release after close.
     static var isOpen: Bool { current != nil }
 
@@ -71,6 +82,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             backing: .buffered,
             defer: false)
         window.title = "Spendable"
+        window.isRestorable = false
         window.isReleasedWhenClosed = false
         window.contentView = container
         window.contentMinSize = Self.minimumContentSize

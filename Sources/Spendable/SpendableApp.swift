@@ -5,6 +5,7 @@ import SwiftUI
 /// number-in-the-bar item and the compact panel; until then it exists so the app can be reached.
 @main
 struct SpendableApp: App {
+    @NSApplicationDelegateAdaptor(SpendableApplicationDelegate.self) private var appDelegate
     @State private var model = AppModel()
 
     var body: some Scene {
@@ -22,6 +23,7 @@ struct SpendableApp: App {
             Label("Spendable", systemImage: "dollarsign.circle")
                 .onAppear {
                     LaunchTiming.markStatusItemVisible()
+                    appDelegate.model = model
                     model.start()
                     #if DEBUG
                     DebugLaunchOptions.apply(model: model)
