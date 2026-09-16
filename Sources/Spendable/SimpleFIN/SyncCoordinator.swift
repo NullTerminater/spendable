@@ -207,8 +207,10 @@ actor SyncCoordinator {
             let fetched = await fetchWindow(window, credential: credential, purpose: .backfill, now: now, report: &report)
             guard fetched else {
                 // A refused or failed window leaves progress exactly where it was, so the same span
-                // is asked for again rather than stepped over.
-                report.stillFillingHistory = report.refusal != nil
+                // is asked for again rather than stepped over. Either way the walk is unfinished:
+                // saying otherwise would tell the owner their history is complete when months of
+                // it never arrived.
+                report.stillFillingHistory = true
                 try? await database.writer.write { [progress] db in try progress.save(db) }
                 return
             }

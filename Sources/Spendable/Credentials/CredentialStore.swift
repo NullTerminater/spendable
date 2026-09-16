@@ -36,30 +36,47 @@ extension SimpleFINCredential: CustomReflectable {
 }
 
 enum CredentialStoreError: Error, Equatable {
+    /// Which way the keychain was being used when it refused. The owner-facing sentence has to say
+    /// which, because the two ask for different next moves: a failed read means the connection the
+    /// app already has could not be opened, and a failed write means the token just pasted was
+    /// spent and not kept. Telling the owner to "try again" after a failed *write* sends them back
+    /// to a token the server has already burned, and the 403 that follows reads as theft.
+    enum Operation: Equatable, Sendable {
+        case reading
+        case writing
+    }
+
     /// The item was written but reading it back did not return the same credential.
     case verificationFailed
-    case keychain(OSStatus)
+    case keychain(OSStatus, while: Operation)
     case encoding
 
     /// macOS refused rather than reported nothing there. The difference matters enormously: a
     /// locked keychain must never be mistaken for "the bank rejected your connection", which would
     /// send the owner off to burn a setup token they did not need to burn.
     var isRefusalRatherThanAbsence: Bool {
-        guard case .keychain(let status) = self else { return false }
+        guard case .keychain(let status, _) = self else { return false }
         return status == errSecInteractionNotAllowed || status == errSecAuthFailed
             || status == errSecUserCanceled || status == errSecNotAvailable
     }
 
     var ownerFacingMessage: String {
-        if isRefusalRatherThanAbsence {
-            return "macOS wouldn't let me read your saved connection. Unlock your login keychain and try again."
+        if case .keychain(_, let operation) = self, isRefusalRatherThanAbsence {
+            switch operation {
+            case .reading:
+                return "macOS wouldn't let me read your saved connection. Unlock your login keychain and try again."
+            case .writing:
+                return "macOS wouldn't let me save the connection. Unlock your login keychain and press Try again."
+            }
         }
         switch self {
         case .verificationFailed:
             return "macOS said it saved your connection, but reading it back gave something different. Nothing has been kept."
         case .encoding:
             return "Your saved connection couldn't be read. You'll need to connect again."
-        case .keychain:
+        case .keychain(_, .reading):
+            return "macOS wouldn't let me read your saved connection."
+        case .keychain(_, .writing):
             return "macOS wouldn't let me save the connection."
         }
     }
@@ -134,7 +151,7 @@ final class KeychainCredentialStore: CredentialStore {
         case errSecItemNotFound:
             return nil
         default:
-            throw CredentialStoreError.keychain(status)
+            throw CredentialStoreError.keychain(status, while: .reading)
         }
     }
 
@@ -150,9 +167,17 @@ final class KeychainCredentialStore: CredentialStore {
             add[kSecAttrLabel as String] = "Spendable — SimpleFIN access"
             status = SecItemAdd(add as CFDictionary, nil)
         }
-        guard status == errSecSuccess else { throw CredentialStoreError.keychain(status) }
+        guard status == errSecSuccess else { throw CredentialStoreError.keychain(status, while: .writing) }
 
-        guard let readBack = try load(), readBack == credential else {
+        // The read-back is part of saving, so a keychain that refuses it is reported as a failed
+        // save. Otherwise the owner is told to retry a read they never asked for.
+        let readBack: SimpleFINCredential?
+        do {
+            readBack = try load()
+        } catch CredentialStoreError.keychain(let status, _) {
+            throw CredentialStoreError.keychain(status, while: .writing)
+        }
+        guard let readBack, readBack == credential else {
             throw CredentialStoreError.verificationFailed
         }
     }
@@ -160,7 +185,7 @@ final class KeychainCredentialStore: CredentialStore {
     func delete() throws {
         let status = SecItemDelete(baseQuery() as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw CredentialStoreError.keychain(status)
+            throw CredentialStoreError.keychain(status, while: .writing)
         }
     }
 

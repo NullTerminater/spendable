@@ -224,6 +224,10 @@ struct SafeToSpendReport: Equatable, Sendable {
 // MARK: - The engine
 
 enum SafeToSpendEngine {
+    /// What a charge with no paying account is called. The narrative checks against this rather
+    /// than against the literal, because "the your accounts balance" is not English.
+    static let unnamedAccountPhrase = "your accounts"
+
     /// How many whole days a balance may be behind before the app says so.
     static func staleAfterDays(for source: AccountSource) -> Int {
         source == .manual ? 3 : 2
@@ -244,19 +248,10 @@ enum SafeToSpendEngine {
         let classified = accounts.map { classify($0, today: today, calendar: calendar) }
         let counted = classified.filter { $0.standing.isCounted }
 
-        // An account that is held out but holds nothing and owes nothing is noise, not a reason to
-        // refuse to answer.
-        let holdsSomething = classified.contains { account in
-            switch account.standing {
-            case .counted: true
-            case .heldOut, .creditCard:
-                account.balanceCents != 0 || charges.contains { $0.payingAccountId == account.id }
-            case .archived: false
-            }
-        }
-        if counted.isEmpty {
-            return holdsSomething ? .nothingCountable(classified) : .nothingCountable(classified)
-        }
+        // Accounts that exist but cannot be counted mean the app does not know — however little
+        // those accounts contain. An empty held-out account is still an account whose money the app
+        // cannot vouch for, and answering $0 in that state would read as a fact rather than a gap.
+        if counted.isEmpty { return .nothingCountable(classified) }
 
         let confirmed = charges.filter { $0.status == .confirmed }
         let datable = confirmed.filter { $0.nextExpectedDate != nil }
@@ -517,7 +512,7 @@ enum SafeToSpendEngine {
         return Obligation(
             chargeId: charge.id, name: charge.name, amountCents: charge.amountCents, dueDay: day,
             kind: charge.kind, payingAccountId: charge.payingAccountId,
-            treatment: .paidButStillCounted(accountName: paying?.name ?? "your accounts", markedOn: markedDay))
+            treatment: .paidButStillCounted(accountName: paying?.name ?? unnamedAccountPhrase, markedOn: markedDay))
     }
 
     /// Bills due between payday and the end of the month, which the until-payday window leaves out.

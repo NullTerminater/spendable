@@ -262,7 +262,12 @@ enum SafeToSpendNarrative {
     ) -> String {
         let amount = Cents.format(obligation.amountCents, locale: locale)
         if case .paidButStillCounted(let accountName, let markedOn) = obligation.treatment {
-            return "\(obligation.name) \(amount) — you told me you paid this on \(markedOn.shortPhrase(in: calendar)), and the \(accountName) balance I have still includes it."
+            // A charge that names no paying account falls back to "your accounts", which cannot
+            // take "the" in front of it.
+            let whose = accountName == SafeToSpendEngine.unnamedAccountPhrase
+                ? "the balance I have"
+                : "the \(accountName) balance I have"
+            return "\(obligation.name) \(amount) — you told me you paid this on \(markedOn.shortPhrase(in: calendar)), and \(whose) still includes it."
         }
         let cardNote: String
         if case .subtractedOnCardWithoutStatement(let cardName) = obligation.treatment {
@@ -305,6 +310,19 @@ enum SafeToSpendNarrative {
     static func answer(
         figure: SpendableFigure, report: SafeToSpendReport, locale: Locale, calendar: Calendar
     ) -> String {
+        if figure.remainderCents <= 0, figure.payPending, let landedOn = figure.paydayForPending {
+            // A paycheck that has arrived but has not reached any balance yet would otherwise read
+            // as a shortfall the owner does not have. The cause comes first, then the arithmetic,
+            // and the bare "you're short" sentence is not said at all in this state.
+            let newest = report.accounts.filter { $0.standing.isCounted }.map(\.asOf).max()
+            let newestPhrase = newest.map { " — the newest balance here is from \($0.shortPhrase(in: calendar))" } ?? ""
+            let due = Cents.format(figure.subtractedCents, locale: locale)
+            let have = Cents.format(figure.contributedCents, locale: locale)
+            let window = figure.kind == .untilPayday && figure.payday != nil
+                ? "the bills due before \(figure.payday!.shortPhrase(in: calendar))"
+                : "this month's bills"
+            return "Your pay from \(landedOn.shortPhrase(in: calendar)) isn't in these balances yet\(newestPhrase). Counted without it, \(window) come to \(due) against the \(have) your accounts last showed."
+        }
         if figure.remainderCents < 0 {
             let short = SafeToSpendDisplay.shortfall(figure.remainderCents, locale: locale)
                 .replacingOccurrences(of: "-", with: "")

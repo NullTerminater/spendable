@@ -76,8 +76,13 @@ enum Cents {
     }
 
     /// "$1,234.56" in the given locale. Exact cents, for disclosures and lists.
-    static func format(_ cents: Int64, locale: Locale = .current) -> String {
-        let formatter = currencyFormatter(locale: locale)
+    ///
+    /// `currency` is US dollars unless a caller says otherwise. Every number the engine produces is
+    /// in US dollars by construction — an account in any other currency is held out — so the only
+    /// callers that pass anything else are the ones showing a held-out account's own balance. A
+    /// Canadian balance printed with a dollar sign invites the owner to retype it as US dollars.
+    static func format(_ cents: Int64, locale: Locale = .current, currency: String = "USD") -> String {
+        let formatter = currencyFormatter(locale: locale, currency: currency)
         formatter.minimumFractionDigits = 2
         formatter.maximumFractionDigits = 2
         let magnitude = Decimal(cents.magnitude)
@@ -88,18 +93,20 @@ enum Cents {
     /// "$1,234" for headlines: whole dollars, floored. Negative values keep their sign; the
     /// `$0 (balance: −$X)` rule for safe-to-spend is applied by the caller, not here.
     static func formatWholeDollars(_ cents: Int64, locale: Locale = .current) -> String {
-        let formatter = currencyFormatter(locale: locale)
+        let formatter = currencyFormatter(locale: locale, currency: "USD")
         formatter.minimumFractionDigits = 0
         formatter.maximumFractionDigits = 0
         let dollars = flooredDollars(cents)
         return formatter.string(from: NSNumber(value: dollars)) ?? "$\(dollars)"
     }
 
-    private static func currencyFormatter(locale: Locale) -> NumberFormatter {
+    private static func currencyFormatter(locale: Locale, currency: String) -> NumberFormatter {
         let formatter = NumberFormatter()
         formatter.locale = locale
         formatter.numberStyle = .currency
-        formatter.currencyCode = "USD"
+        // An unknown or empty code would make the formatter fall back to the locale's own currency,
+        // which is the one mistake this parameter exists to prevent.
+        formatter.currencyCode = currency.count == 3 ? currency.uppercased() : "USD"
         return formatter
     }
 
