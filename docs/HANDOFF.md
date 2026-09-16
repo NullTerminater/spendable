@@ -1,0 +1,222 @@
+# Where this project is
+
+Written 15 September 2026, at the point milestone 4 was half built. Anyone picking this up — a
+person or another session — should be able to carry on from here without re-deriving anything.
+
+The plan and every decision the owner has made is `docs/PLAN.md`. Read that first if you have not.
+
+## State at a glance
+
+| Milestone | State | Tag |
+|---|---|---|
+| 1. Project skeleton, signing, schema, manual accounts, window | **Done, reviewed by the owner** | `v0.1-skeleton` |
+| 2. Safe-to-spend engine, disclosure, pay schedule, manual bills | **Done, reviewed by the owner** | `v0.2-engine` |
+| 3. SimpleFIN client, Keychain, chunked budgeted sync, memory test | **Done, reviewed by the owner** | `v0.3-simplefin` |
+| 4. Real-token setup, account types, staleness display, scheduler | **Half built — see below** | — |
+| 5. Recurring-charge detection, confirm/dismiss, subscription totals | Not started | — |
+| 6. Credit cards: due day, statement balance, minimum | Not started | — |
+| 7. `MenuBarExtra`: the number in the bar, compact panel | Not started | — |
+| 8. WidgetKit extension over a summary file | Not started (a throwaway stub exists from milestone 1) | — |
+| 9. Settings, re-claim, diagnostics, final performance pass | Not started | — |
+
+182 tests pass. `main` is pushed to the private remote. Everything for milestone 4 is **uncommitted
+working tree** except the review document.
+
+## How to verify what is done
+
+```bash
+scripts/bootstrap.sh
+xcodebuild -project Spendable.xcodeproj -scheme Spendable -configuration Debug -allowProvisioningUpdates build
+xcodebuild -project Spendable.xcodeproj -scheme Spendable -destination 'platform=macOS' test
+```
+
+Milestones 1 and 2 are visible in the app: run it, open the window from the menu bar icon, add an
+account and a bill. Milestone 3 has no screen of its own; drive it against SimpleFIN's public demo:
+
+```bash
+open --env SPENDABLE_DEBUG_CONTAINER=/tmp/spendable-demo --env SPENDABLE_DEBUG_CONNECT_DEMO=1 DerivedData/Build/Products/Debug/Spendable.app
+```
+
+That claims a fresh single-use demo token, stores it under a separate keychain item from any real
+connection, syncs, and writes what it did to `/tmp/spendable-demo/measurements.log`.
+
+## Measured numbers
+
+From `scripts/measure-launch.sh`, `measure-memory.sh` and `leaks-diff.sh`, Debug build, against a
+scratch container. Targets from the specification: warm launch under 300 ms, idle under 60 MB, under
+120 MB with the window open, near-zero idle CPU.
+
+| Milestone | Warm launch | Idle | With window | Leaks |
+|---|---|---|---|---|
+| 1 | 200 ms | 14.3 MB | 21.7–22.4 MB | 0 |
+| 2 | 153 ms | 14.5 MB | 26.0–26.9 MB | 0 |
+| 3 | 161 ms | 14.8 MB | 26.4–27.2 MB | 0 |
+
+Both safe-to-spend figures compute in 4.3 ms on 40 accounts and 120 bills. Storing a year of
+transactions (5,984 rows, 11 windows) grows the live heap by 229 KB.
+
+---
+
+# Milestone 4: exactly where it stopped
+
+## Why it stopped
+
+The session ran out of usage twice during milestone 4's design review, and then the owner asked for
+this handoff. Nothing is blocked on a decision or a problem — it stopped mid-implementation.
+
+## The design and its review are complete
+
+`docs/CONNECTING.md` is the design. It was then attacked by four independent readers before
+implementation, the same practice used for milestones 2 and 3. That review is
+**`docs/reviews/milestone-4-review.md`**: 31 findings, 27 decisions, 25 test cases, kept verbatim.
+
+**Read that file before writing any more milestone 4 code.** It contains the complete final rule
+set — the guesser's algorithm and word lists, the exact sentences the owner reads, the scheduler
+contract — and several of its decisions are not things anyone would arrive at unaided. Note that
+`docs/CONNECTING.md` has **not** been rewritten to match the review yet; where the two disagree, the
+review wins.
+
+The reviews for milestones 2 and 3 are in the same folder. They were rescued from a session
+scratchpad that was about to be deleted; they explain why several shipped rules look odd.
+
+## Built, working, tested — but not committed
+
+- **`Sources/Spendable/SimpleFIN/AccountTypeGuess.swift`** — the account-type guesser, complete and
+  matching the review's specified algorithm: normalise, strip the bank's own name, match whole words
+  and phrases never substrings, longest phrase first, and refuse to guess when two strong categories
+  collide. `Tests/SpendableTests/AccountTypeGuessTests.swift` covers it against the review's table of
+  real US bank names, including the traps: "ALLIANT CREDIT UNION CHECKING" is a current account,
+  "CARDINAL CHECKING" is not a card, "SAVINGS SECURED VISA" and "MONEY MARKET CHECKING" ask rather
+  than guess, "CITI DOUBLE CASH" is not cash, "FIDELITY CASH MANAGEMENT" is investments.
+- **`Sources/Spendable/SimpleFIN/SyncState.swift`** — the `sync_state` keys the scheduler's gates
+  need (`balances-synced-at`, `transactions-pulled-at`, `sync-attempted-at`,
+  `sync-failures-in-a-row`, `connected-at`), plus `SyncShape` and `SyncPolicy`, a pure decision about
+  whether to sync and what to ask for. `Tests/SpendableTests/SyncPolicyTests.swift` covers it.
+- **`Sources/Spendable/SimpleFIN/SyncCoordinator.swift`** — rewritten. Three of the review's blocking
+  findings are fixed here:
+  - a real single-flight `Task`, because an actor serialises statements rather than whole operations,
+    so two triggers would each have got past the budget check at a different `await` and each spent a
+    request;
+  - `SyncShape`, so transactions are actually fetched again after the first history walk ends. The
+    old code declared a `reason` parameter and never read it, which meant no transaction would ever
+    have been fetched again;
+  - a report that distinguishes "still filling in history" from a failure, because every first
+    connection ends on a budget refusal by design and the old code called that an error.
+- **The investments rule in the engine** — an account the bank reports holdings for is held out of
+  every total whatever it is called and whatever the owner opts into, with wording in
+  `SafeToSpendNarrative`, `MainWindowView` and `OverviewView`. This came out of milestone 3's review:
+  the demo's own savings account holds six figures of Apple stock and is called "SimpleFIN Savings".
+
+## Not built yet
+
+In the order I would do them. Each item names the decision in
+`docs/reviews/milestone-4-review.md` that specifies it.
+
+1. **Migration v4** (`migration-v4`). Six columns on `account`: `guessed_from_name`, `guess_class`,
+   `holdings_observed_at`, `resumed_updating_at`, `merge_candidate_for`, `merge_answered_at`. Add the
+   matching properties to `Account` and the name to `AppDatabase.allMigrations`. Nothing else in the
+   schema changes in this milestone. **Do this first** — most of what follows needs those columns.
+2. **Wire the guesser into ingestion** (`the-guess-is-computed-once`). Compute the guess once, in the
+   transaction that inserts the account row, from `remote_name`; store it with
+   `guessed_from_name`; never recompute it. A later rename must never re-type an account.
+3. **`holdings_observed_at`** (`holdings-before-a-guess-counts`). Set it on any **dated** answer that
+   carried a `holdings` key, empty or not. A balances-only answer never sets it. Then a `checking` or
+   `cash` *guess* on an account that has never had a dated answer does not count yet — a new
+   `HeldOutReason.notLookedInsideYet`. This is what stops an $18,000 brokerage sweep account named
+   "…CASH MANAGEMENT" entering the headline as spendable money. The coordinator must also carry on
+   into `fetchTransactions` in the same run when `outcome.accountsInserted > 0`, so that normally
+   resolves within minutes.
+4. **Engine classification order** (same decision, last paragraph). Pin it: archived →
+   superseded-pending-answer → currency → loan → investments → not-looked-inside-yet → no type →
+   credit → savings opt-in → not updating → age.
+5. **What a guess may do to the number** (`what-a-guess-may-do-to-the-number`). Per-outcome
+   permissions and the exact row sentences.
+6. **The setup screen** (`the-paste-field`, `nothing-is-written-before-the-keychain-write-verifies`,
+   `who-holds-the-unsaved-claim`, `keychain-error-knows-which-operation-failed`,
+   `setup-screen-second-visit`, `claim-cut-off-in-flight`,
+   `history-progress-says-a-date-not-a-fraction`). The screen where a real token is pasted.
+7. **The two credential banners** (`two-credential-banners`). Different titles, bodies, icons and
+   buttons: one asks the owner to paste a new token, the other to unlock their keychain. Confusing
+   them costs them a setup token, so the keychain banner must never render a paste field.
+8. **Type confirmation in the UI** (`confirming-a-guess-moves-the-number`). Confirming a checking
+   guess unlocks the bank's available balance, which *moves the headline*, and the app must say so.
+9. **One coordinator, one scheduler** (`one-coordinator-one-scheduler`, `scheduler-lifecycle`,
+   `background-activity-completion-contract`, `tolerance-versus-the-overdue-gate`,
+   `wake-and-launch-before-the-network`). `AppModel` owns a single `SyncCoordinator` and a single
+   `NSBackgroundActivityScheduler`; the completion handler must be called exactly once on every path
+   or syncing stops silently forever; `NWPathMonitor` so an offline wake does not spend a request.
+10. **The remaining states and wording** (`one-connection-fails-others-fine`, `vanished-and-returned`,
+    `non-usd-balances`, `archiving-confirmation`, `the-accounts-screen-says-what-it-left-out`,
+    `connected-but-no-accounts`, `manual-account-the-bank-duplicates`).
+11. **Tests** for all of the above, from the review's 25 cases.
+12. **Measure, commit in small pieces, tag `v0.4-connected`, then stop** and let the owner run it.
+
+## One question the review raised for the owner
+
+The owner's decision 4 says keyword-backed type guesses count immediately. The holdings rule
+qualifies that for `checking` and `cash` guesses only: such a guess does not count until an answer
+that lists holdings has been seen for that account. Normally that is the same sync, because a
+balances refresh that turns up a new account now fetches its transactions in the same run. In the
+rare case where that dated answer is refused by the budget or fails, a genuinely-ordinary current
+account is visibly held out, with a sentence, for up to a day rather than counting.
+
+I implemented the safe reading, because the alternative risk is a share portfolio entering the
+headline as spendable money. It is worth confirming, and it is the only open question.
+
+---
+
+# Things that cost real time to discover
+
+Do not rediscover these.
+
+## macOS and this machine
+
+- **`NSHostingView` as a window's content view resizes the window.** Used directly as `contentView`,
+  or through `NSHostingController` as `contentViewController`, SwiftUI resizes the window to the
+  content's ideal size after every layout, silently, whatever `sizingOptions` says — a loading
+  spinner shrank the window to 151×53 and undid the user's own resizing within 100 ms. Fix: put the
+  hosting view inside a plain `NSView` container pinned by constraints, set the window's minimum in
+  AppKit, and use an `NSToolbar` rather than SwiftUI's `.toolbar`. **Reuse this for Settings in
+  milestone 9.**
+- **`URL.user()` and `URL.password()` return percent-encoded values**, despite the documented
+  default. Use `URLComponents.user` / `.password`. This would have stored a wrong password, verified
+  it against itself, and spent the owner's single-use token finding out.
+- **Signing** works on the free Personal Team `UW2KV7XB66` with a Team-ID-style App Group
+  (`UW2KV7XB66.spendable`) and the file-based login keychain. No provisioning profile is involved.
+- **`osascript` has no assistive access here**, so the UI cannot be clicked from a shell. Drive it
+  with the Debug-only environment variables instead: `SPENDABLE_DEBUG_CONTAINER`, `_SCREEN`,
+  `_FIGURE`, `_SEED_SAMPLE`, `_OPEN_WINDOW`, `_MEMORY_CYCLE`, `_ENGINE_BENCH`, `_CONNECT_DEMO`.
+- **`log show` returns nothing for this app from a shell.** Measurements are read from
+  `<container>/measurements.log` instead. Screen Recording is granted, so
+  `screencapture -x -o -l <windowID>` works; there is a small `listwindows` helper pattern in the
+  session notes for finding the window id via `CGWindowListCopyWindowInfo`.
+- **The pre-commit hook rightly rejects credential-shaped literals in test files.** Build such URLs
+  at runtime with `URLComponents` rather than weakening the hook. There is also a `commit-msg` hook.
+
+## SimpleFIN, verified against the live server
+
+- **A request carrying an `end-date` is answered with the balance as of that date.** Balances come
+  only from `version=2&balances-only=1`, which carries no dates.
+- **A balances-only answer returns `transactions: []` for every account**, indistinguishable from
+  "this account had no transactions". The request kind must travel with the response, or routine
+  refreshes will void live pending charges and march watermarks over unfetched days.
+- **`INSERT OR REPLACE` on `account` cascades away the owner's whole transaction history.** Use a
+  named-column `ON CONFLICT … DO UPDATE`.
+- **`gen.api` "may be capped" is advice; "was capped" is a hole in the data.** Tell them apart by
+  tense, or good responses get thrown away.
+- **Transaction ids are not stable.** Unique within an account, never promised stable between
+  answers. The public demo fabricates fresh ids *and* amounts on every request, so it cannot verify
+  deduplication either way.
+- **The quota is 24 requests a day and the token is disabled past it**, which would cost the owner a
+  hand-made setup token. The app's own budget is a rolling 24 hours, not a calendar day.
+
+## The practice that has been worth the most
+
+Write the contract as a document first, have it attacked by several independent readers, then
+implement. It found 42 problems in milestone 2's engine design, 40 in milestone 3's sync design and
+31 in milestone 4's — including, in each case, at least one rule that would have silently produced a
+wrong number about the owner's money. `docs/ENGINE.md`, `docs/SYNC.md` and `docs/CONNECTING.md` are
+those contracts; `docs/reviews/` holds what came back.
+
+Do the same for milestone 5 (subscription detection) and milestone 6 (credit cards). Both are full
+of the same kind of quiet arithmetic error.
