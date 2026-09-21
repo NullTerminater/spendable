@@ -5,6 +5,12 @@ how it asks for data, what it does with the answer, and what it does when the an
 written out in full for the same reason `docs/ENGINE.md` is — a wrong rule here puts wrong numbers
 in front of someone who is trusting them.
 
+This describes the implementation through milestone 4. [CONNECTING.md](CONNECTING.md) covers its
+setup and recovery screens; [PLAN.md](PLAN.md), binding rule 13, records the owner's approval
+to repair a rejected credential now. Replacing a working credential remains milestone 9. The
+milestone 3 and 4 review files are preserved as historical decisions, not edited to look like a
+record of shipped behavior.
+
 Everything below about the server's behaviour was checked against the live SimpleFIN Bridge on
 2026-09-14 and 2026-09-15, not inferred from the specification. Where the two differ, the live
 behaviour is noted.
@@ -52,7 +58,10 @@ the single-use token doing so.
   and holdings are the strongest signal that a balance is a market value rather than money: the
   demo's savings account holds six figures of stock and is called "SimpleFIN Savings", so a
   name-based guess would make it spendable. A balances-only answer returns an empty holdings array
-  for every account, so the count is only ever taken from an answer that actually lists them.
+  for every account, so that empty array is not evidence. A positive array on either request shape
+  records investment holdings. A dated answer with a holdings key also records
+  `holdings_observed_at`, even when the array is empty; only that dated evidence releases the
+  checking/cash guess gate described in [ENGINE.md](ENGINE.md).
 
 ## Getting a credential
 
@@ -67,29 +76,68 @@ the single-use token doing so.
    `pq%2Frs%40tu`. Writing that to the Keychain and reading it back compares equal to itself, so the
    app would "verify" a password the server will never accept, with the single-use token already
    spent.
-5. **It writes the credential to the Keychain and reads it back, comparing byte for byte, before it
+5. **It writes the credential to the Keychain and reads it back, comparing the credential and receipt, before it
    does anything else with the response.** A setup token is single-use: if the write silently failed
    the token would be spent and unrecoverable.
-6. A 403 means the token was already claimed or never existed: "This setup token was already used or
+6. A 403 on the claim means the token was already claimed or never existed: "This setup token was already used or
    doesn't exist. If you didn't use it in another app, someone else may have — disable it on the
-   SimpleFIN website, then generate a fresh one." Any other status asks for a fresh token.
+   SimpleFIN website, then generate a fresh one." A local claim attempt in the preceding hour uses
+   the more specific spent-token explanation in [CONNECTING.md](CONNECTING.md). A dropped claim
+   explains that the app cannot know whether the token was spent; other failures retain their own
+   subscription, server or malformed-answer diagnosis.
 
-The claim response is held in memory only until the Keychain write is confirmed, and never logged.
+The claimed credential is held in memory until its save is verified, and is never logged.
 
 **If the Keychain write fails after a successful claim**, the token is already spent and the answer
 exists nowhere else, so it must be kept in memory for the rest of the session rather than discarded,
 and the owner told: "Your setup token has already been used up — don't generate another one yet.
 macOS wouldn't let me save the connection. Unlock your login keychain and press Retry."
-**Not built yet (milestone 4).** Today the client hands the credential back to its caller,
-`KeychainCredentialStore.save` throws, and the caller drops it; the only message that exists is the
-store's own "macOS wouldn't let me save the connection. Unlock your login keychain and press Try
-again." The retained claim (`AppModel.unsavedConnection`) and the Retry button are milestone-4
-work.
+Milestone 4 implements this in `AppModel.unsavedConnection`: closing a window retains it, Try again
+retries saving without another POST, and no first-connection account request is sent before the
+read-back verifies. Quitting while it is unsaved requires the explicit warning in CONNECTING.
+Successful saving records `connected-at` and starts the shared scheduler and first sync.
+
+A newly saved credential carries `awaiting-first-balance` until the first successful balances
+answer. A rejection before that point says "SimpleFIN rejected the credential I just stored. This
+is a bug in Spendable, not a problem with your token — don't generate another one." The saved
+credential remains available to Check again; a normal re-claim prompt must not burn another token
+automatically. The distinction survives relaunch. The owner may explicitly confirm Replace anyway,
+recorded separately as `unverified-replacement-approved`; a newly saved replacement gets the same
+first-answer protection again. Both flags clear on successful balances.
+
+Recovery of a previously rejected credential follows PLAN rule 13 and CONNECTING: pause new
+syncs, let the current run finish, stage and verify the replacement while the old credential remains
+readable, then promote it. Saving failure retains the new claim for Retry and preserves the old
+credential. Successful replacement clears the rejection marker, restarts `backfill-progress` and
+clears `transactions-pulled-at`; accounts, transactions, corrections, rolling request budgets and
+quota warnings remain. Reports from the old credential cannot overwrite the new presentation.
+If a replacement sends a different `conn_id`, ingestion adopts exactly one existing non-archived
+synced row matching `(org_id, external_id)` only when its old connection is absent from the response's
+`connections` array. Two live logins at the same institution therefore remain separate. An unmatched
+old account keeps its data and is marked as not updating when absent from a nonempty balance answer.
+
+**A saved credential must survive the gap before database bookkeeping.** Each new save or promotion
+stores an opaque random receipt inside the encrypted Keychain payload. The receipt is unrelated to
+the credential's contents; it is not a token, password or credential hash. Loading the credential and
+its receipt is one atomic read. The database stores only the applied receipt's generation under
+`credential-generation-applied` in `sync_state`. On startup, on setup entry, and before the first
+ordinary sync or repair controls can proceed, the app reconciles an unapplied receipt: it applies the connection/replacement
+bookkeeping and the generation marker in the same database transaction. This repairs a crash after
+Keychain promotion even when the database still says the old credential was rejected. It consumes
+no requests, changes no budget or quota reservations, and does not reset history again once that
+receipt has been applied.
+
+Legacy Keychain payloads without receipts remain readable while no generation has been tracked.
+A missing receipt after one has been tracked fails closed; it never opens a fresh token field.
+If the Keychain save has been read back successfully but database bookkeeping fails, the connection
+is durable. The app offers Check again to retry local bookkeeping before any request; it does not
+claim that quitting would lose the saved connection or ask for another setup token.
 
 Reading is the same distinction in reverse. Only `errSecItemNotFound` means "not connected".
 `errSecInteractionNotAllowed`, `errSecAuthFailed` and `errSecUserCanceled` are macOS refusing, which
 is its own state — "macOS wouldn't let me read your saved connection" — and must never reach the
-re-connect banner, which is reserved for a server that actually answered 403.
+re-connect banner, which requires an actual server credential rejection (HTTP 403 or `gen.auth`
+inside HTTP 200), with the first-answer distinction above.
 
 ## Asking for data
 
@@ -144,21 +192,27 @@ span is asked for again, and the owner gets a notice saying a charge is missing.
 Every error is routed by the prefix of its code, because the subcode may be one the app has never
 heard of:
 
-| Code | Belongs to | What the owner will see (milestone 4) |
+| Code | Belongs to | What the owner sees |
 |---|---|---|
 | `act.*` | The named account | Shown against that account |
 | `con.*` | Every account of that connection | Shown against every account of that connection, in SimpleFIN's own words — the app writes none of these sentences itself |
-| `gen.auth` | The whole connection | A banner: the saved connection no longer works, paste a new setup token |
+| `gen.auth` | The whole connection | A rejected-credential banner, or the first-answer diagnostic above when the credential has never been accepted |
 | `gen.api` about how the app asked | The developer | Logged only. It is about how the app asked, not about the owner |
 | `gen.api` about the rate | The owner, and the budget | Shown once, attributed to SimpleFIN, and `quota-tripped-at` is written: every non-manual sync stops for twenty-four hours, and a manual refresh is refused with "SimpleFIN warned that I've been asking too often, so I've stopped for today to keep your connection working." Recognised in the deprecated `errors` array too, which is where the Bridge's own guide says the warning arrives |
 | anything else | Treated as its prefix | |
 
-**What is built today is the routing, not the showing.** `SimpleFINIngest.route` attaches every
-error to an account, a connection, the whole credential, everything, or the log, and hands them back
-in `SyncOutcome.notices`. Nothing displays them yet, and `SyncReport.needsAttention` looks only at a
-credential problem or a transport failure, so a `gen.auth` that ever arrived inside an HTTP 200 would
-be routed to the whole credential and still raise no banner. Wiring the notices to the window, and
-the banner to `gen.auth`, is milestone 4.
+`SimpleFINIngest.route` attaches every error to an account, a connection, the whole credential,
+everything, or the developer, and returns `SyncOutcome.notices`. Milestone 4 persists the balance
+answer's notices in `connection-notices` and displays account and connection causes in their rows
+and disclosure. Notices first received in a dated answer are deduplicated and merged into that
+stored list in the same write as ingestion, and also appended to the run's report. A historical
+answer cannot erase a balance failure notice. Scoped errors mark the affected accounts as not
+updating and leave the dated window incomplete, so the same span is retried.
+
+`gen.auth` inside HTTP 200 is a rejection, never a successful balance. A rejection during history
+also persists `credential-rejected` and marks the synced accounts as not updating, even if balances
+arrived earlier in the run. `connectionIsWorking` is false and `needsAttention` is true for that
+report. The original balances and transaction history remain stored.
 
 Error text from the server is shown as plain text, never as markup, and is always attributed to
 SimpleFIN rather than presented as the app's own words.
@@ -188,7 +242,7 @@ early the next morning, and a time-zone change resets it for free.
 A request is **reserved before it is sent**, in its own committed write, so a crash between spending
 and recording can only ever over-count, which is safe. Counting successes instead would under-count,
 and the server counts every request it served whether or not the answer arrived. At most 14 in any
-rolling 24 hours, of which at most 6 may be history windows — so filling in history deliberately
+rolling 24 hours, of which at most 6 may be backfill windows — so filling in history deliberately
 spreads over two days rather than colliding with the day's ordinary refreshes.
 
 There is exactly **one** `SyncCoordinator` in the process, owned by `AppModel` and handed to the
@@ -198,42 +252,48 @@ than starting again, and the joining report says so (`joinedARunInProgress`). An
 enough — it serialises statements, not whole operations, so two triggers would each get past the
 budget check at a different `await` and each spend a request — and two *instances* share no
 single-flight state at all: both reserve a balances request, both read `MIN(tx_synced_through)`
-before either writes, and both buy the same 44-day window. `AppModel` owns none today and
-`DebugLaunchOptions` still builds its own, which is milestone-4 work.
+before either writes, and both buy the same 44-day window. Milestone 4 supplies this shared owner;
+the Debug demo path also uses its coordinator. Tests may construct isolated coordinators against
+their own stores, but production triggers never construct a second one.
 
 The cadence inside that budget:
 
-- A balances-only refresh every six hours. **The refresh itself is not built yet (milestone 4).**
-  Balances go stale after six hours — `SyncPolicy.balancesStaleAfter` — and any trigger that finds
-  them stale asks for them. That is a gate, not a clock: nothing in the app schedules anything today,
-  and the only thing that starts a sync is the Debug demo connection. The scheduler will be one
-  `NSBackgroundActivityScheduler`, six-hour interval, one hour of tolerance, utility quality of
-  service, and it is the hour of slack that scatters the request away from the top of the hour,
+- The process owns one `NSBackgroundActivityScheduler`, with a six-hour interval, one hour of
+  tolerance and utility quality of service. The hour of slack scatters the request away from the top of the hour,
   which the Bridge is busiest at. The API has no phase, start date or fire-time property, so the app
   cannot pick its own minute, and must never manufacture one with a `Timer`, a `DispatchSourceTimer`
   or a re-`schedule` on a short computed interval — that is the polling the specification forbids.
 - A full transaction pull when the last one is more than twenty-four hours old:
-  `SyncPolicy.transactionsStaleAfter`, measured from `transactions-pulled-at`, which is written only
-  when the recent-gap window was actually fetched and never by a backfill window. Every other sync
-  is balances only.
-- On launch — and on a scheduled fire, a wake or a day change, which are treated identically today —
-  only if `balances-synced-at` is six hours old or more, only if nothing was *attempted* in the last
-  thirty minutes (`quietAfterAnyAttempt`), only if the failure back-off has run out (half an hour,
-  an hour, two, then six, by `sync-failures-in-a-row`), and only if the budget and SimpleFIN's own
-  rate warning both allow it. The milestone-4 review asks for a five-hour gate for the scheduled,
-  wake and day-change triggers, leaving launch at six, so that an activity fire landing early inside
-  its tolerance is used rather than thrown away; that is not built.
-- Manual refresh while budget remains. Three refusals, each with its own words: the day is full —
-  "Already refreshed today. SimpleFIN only gets new bank data about once a day, so there's nothing
-  new to fetch."; SimpleFIN itself warned about the rate — "SimpleFIN warned that I've been asking
-  too often, so I've stopped for today to keep your connection working."; and the history walk's own
-  share is spent — "I'll carry on filling in your history tomorrow — SimpleFIN limits how much I can
-  ask for in a day." The last is progress, not an error.
+  `SyncPolicy.transactionsStaleAfter`, measured from `transactions-pulled-at`. Every successfully
+  completed dated window, including backfill, writes that timestamp; a window with a scoped error
+  or unreadable transaction amount does not. Otherwise a run asks only for balances, except that
+  inserting a new account forces a dated request so its holdings can be inspected. A new account
+  also restarts a terminal history walk; neither this nor credential replacement resets budgets.
+- On launch, `balances-synced-at` must be six hours old or more. Scheduled, wake and day-change
+  triggers use five hours, so an activity firing early within its tolerance is not thrown away.
+  Every automatic trigger also requires that nothing was *attempted* in the last thirty minutes
+  (`quietAfterAnyAttempt`), the failure back-off has run out (half an hour, an hour, two, then six,
+  by `sync-failures-in-a-row`), and the budget and SimpleFIN's own rate warning both allow it.
+  A missing successful-balances timestamp is due immediately, subject to those same gates.
+  Launch, wake and day change first wait for an online `NWPathMonitor` event, at most sixty seconds,
+  without polling. An offline request that still occurs records its attempt and budget reservation,
+  but does not increment the bank-failure count.
+- Manual refresh bypasses time and failure-backoff gates, but respects the rolling budget and
+  server quota warning. If the day is full, "Already refreshed today" is used only when successful
+  balances really arrived today; otherwise the message says requests are spent and gives the last
+  balance date. A quota warning asks the owner to wait. Exhausting only the backfill share after
+  balances arrive is unfinished progress, with the older-history message from CONNECTING, not a
+  broken connection.
+
+Every scheduled run calls the OS activity's completion exactly once, through `SyncActivity.run`
+or the local reconciliation-failure exit, even when policy skips, the Keychain refuses, the Mac is
+offline or the budget is spent. It updates the same observable syncing and history-progress state
+as a foreground refresh.
 
 The data is a day old by nature. Asking more often cannot make it newer.
 
-All of this is kept in the `sync_state` table, and these are its keys, with nothing about a sync
-stored anywhere else: `request-timestamps` and `backfill-request-timestamps` are the two rolling
+The shared cadence, budget and connection facts are kept in `sync_state`; per-account watermarks
+remain on the account rows. `request-timestamps` and `backfill-request-timestamps` are the two rolling
 counts; `quota-tripped-at` records SimpleFIN's own warning about the rate, and for twenty-four hours
 after it every non-manual sync is skipped and a manual one is refused out loud; `balances-synced-at`
 and `transactions-pulled-at` are the two cadence gates; `sync-attempted-at` is written before the
@@ -242,7 +302,11 @@ spending the day on requests nobody answered; `sync-failures-in-a-row` drives th
 half an hour, an hour, two, then six; `connected-at` is how the app knows it is connected — a
 database fact, never a Keychain read, because asking macOS would turn a locked login keychain into
 an app that silently stops scheduling; and `backfill-progress` is the history walk's place in the
-queue.
+queue. `connection-notices` stores the attributed notices shown by M4, `credential-rejected` stores
+an explicit server rejection, and `awaiting-first-balance` plus `unverified-replacement-approved`
+preserve the first-answer/recovery distinction above. `credential-generation-applied` identifies
+the encrypted Keychain receipt whose bookkeeping has been committed. No credential, setup token or
+credential-derived hash is stored in any of these rows.
 
 ## Filling in history
 
@@ -262,7 +326,7 @@ eleven of them cover the thirteen months the app is willing to look — the elev
 over fourteen months back, because a window that crosses the boundary is still asked for whole. It
 stops at whichever comes first: two consecutive successful windows with no transactions returned,
 or the end of that list. A replay containing transaction ids already stored locally is not empty.
-An account or connection error, or an unreadable transaction amount, leaves the window incomplete:
+A routed account or connection error, or an unreadable transaction amount, leaves the window incomplete:
 its cursor stays put and the next run asks for that same span again.
 (The planner's `limit: 12` is a guard rather than a stop rule; the thirteen-month reach always ends
 the walk first.)
@@ -342,11 +406,14 @@ a hold, or count toward the history walk's stop rule. Otherwise two routine refr
 afternoon would void every live hold and march every watermark forward on the strength of answers
 that by definition contained no transactions.
 
-**An account write touches only the columns the server owns**: the remote name, the connection
-fields, the currency, the balances, the holdings count and when it was last seen. `INSERT OR
-REPLACE` is banned outright — it deletes the row first, and the cascade would take the owner's whole
-transaction history with it — and so is a blanket upsert, which would quietly undo the owner's
-account-type correction on every refresh.
+**Sync updates server facts and derived sync state, preserving owner choices.** Existing rows
+receive the remote name, connection fields, currency, guarded balances, holdings evidence and
+seen/stopped/resumed timestamps. The name-based `guessed_type`, `guess_class` and `guessed_from_name`
+are written on insertion, not recomputed on rename; observed holdings can permanently establish the
+investment class. Confirmed types, display names and other owner corrections survive every refresh.
+`INSERT OR REPLACE` is banned outright — it deletes the row first, and the cascade would take the
+owner's whole transaction history with it — and so is a blanket upsert. The manual-duplicate
+candidate and owner-confirmed merge rules are specified in CONNECTING and ENGINE.
 
 ## Never in a log, never in a file
 
@@ -388,9 +455,8 @@ transactions must not be held in memory to be stored.
   the matcher holds a dictionary of the rows it cannot place by id. Keeping the window small is what
   keeps this cheap.
 - Sync work happens off the main actor: `SyncCoordinator` is a plain actor, and a run is an
-  unstructured task inside it. No priority is set yet — the task inherits its caller's — so the
-  `.utility` quality of service the plan asks for arrives with the scheduler in milestone 4, on the
-  activity rather than on the task.
+  unstructured task inside it. The task inherits its caller's priority; milestone 4 sets `.utility`
+  quality of service on the background activity itself.
 - A test pushes a year of synthetic transactions through the real ingestion path and asserts the
   **live heap** comes back to within four megabytes of where it started, measured with
   `malloc_zone_statistics` after `PRAGMA shrink_memory`; the four megabytes are SQLite's own page

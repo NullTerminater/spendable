@@ -4,7 +4,7 @@ A private, single-user macOS menu bar app that answers one question: **how much 
 
 It reads bank balances and transactions through a SimpleFIN Bridge subscription (read-only), keeps everything in a local SQLite database on this Mac, and computes the answer in the main window. The menu bar currently opens that window; the number in the bar and desktop widget arrive in later milestones. No cloud, no telemetry, no accounts. It never moves money.
 
-This repository is private and stays that way. Nothing that touches money is ever committed: no tokens, no access URLs, no real balances or transactions. `CLAUDE.md` holds the rules; `docs/PLAN.md` the plan and every decision; `docs/HANDOFF.md` where the project actually is; `docs/ENGINE.md` and `docs/SYNC.md` the contracts for the shipped engine and sync; `docs/CONNECTING.md` the milestone 4 design, corrected by `docs/reviews/milestone-4-review.md`, which wins wherever the two disagree.
+This repository is private and stays that way. Nothing that touches money is ever committed: no tokens, no access URLs, no real balances or transactions. `CLAUDE.md` holds the rules; `docs/PLAN.md` the plan and every decision; `docs/HANDOFF.md` where the project actually is; `docs/ENGINE.md` and `docs/SYNC.md` the contracts for the shipped engine and sync; `docs/CONNECTING.md` the milestone 4 implementation contract. The owner’s numbered decisions in `docs/PLAN.md` take precedence; otherwise `docs/reviews/milestone-4-review.md` wins where the two disagree.
 
 ## Setup
 
@@ -26,7 +26,7 @@ xcodebuild -project Spendable.xcodeproj -scheme Spendable -configuration Debug -
 Milestones 1–3 are built, measured and owner-reviewed. Milestone 4 now implements real-token
 setup, account corrections, connection repair, staleness wording and the shared sync scheduler.
 Migration v4 and the UI are present; `docs/CONNECTING.md` describes their actual behavior.
-235 tests pass in 26 suites; the signed Debug build succeeds. `docs/HANDOFF.md` records validation. Real-bank acceptance remains with the owner:
+238 tests pass in 26 suites on 21 September; the normal checkout’s signed Debug build succeeds. `docs/HANDOFF.md` records validation. Real-bank acceptance remains with the owner:
 paste the token only into the app, review the accounts, correct a type and check it survives a
 relaunch. Milestone 5 has not started.
 
@@ -39,19 +39,28 @@ Filled in at each milestone from the scripts in `scripts/` (Debug build, this Ma
 | 1 (v0.1-skeleton) | 200 ms (runs: 147, 200) | 201 ms | 14.3 MB | 21.7–22.4 MB | 21.7–22.3 MB | 0 leaks, 0 bytes | 0.0 %, 10 ms of CPU time over 10 s idle |
 | 2 (v0.2-engine) | 153 ms (runs: 159, 153) | 400 ms | 14.5 MB | 26.0–26.9 MB | 25.9–26.7 MB | 0 leaks, 0 bytes | unchanged |
 | 3 (v0.3-simplefin) | 161 ms (runs: 193, 161) | 174 ms | 14.8 MB | 26.4–27.2 MB | 26.3–27.0 MB | 0 leaks, 0 bytes | unchanged |
-| 4 (tag pending idle check) | 175 ms (runs: 170, 175) | 1,661 ms | 15.2 MB | 29.5–30.4 MB | 29.1–29.9 MB | 0 leaks, 0 bytes (full and diff) | 60-minute check running |
+| 4 (v0.4-connected) | 165 ms (runs: 166, 165) | 1,103 ms | 17.5 MB | 32.8–33.5 MB | 31.5–31.9 MB | 0 leaks, 0 bytes | 0.0% sampled; 180 ms CPU during idle check |
 
-Milestone 4 measurements use the final test-passing Debug build with synthetic data. Its first
-measured launch was from a fresh local bundle copy; subsequent launches were 170 and 175 ms.
-The window test used six synthetic accounts and one bill. After five closes the window was
-released every time, while footprint settled near 29.8 MB: framework caches remain resident,
-as in earlier milestones. Allocations/Leaks and Time Profiler recordings are stored outside the repo.
-The one-hour idle run uses an identical binary; real-first-sync footprint awaits owner acceptance.
+Milestone 4's launch, window and full-leak measurements were repeated on 21 September with the
+238-test recovery-receipt build in the normal checkout. The first launch after building took
+1,103 ms; warm launches were 166 and 165 ms. The window test used six synthetic accounts and one
+bill. All five closes released the window; footprint settled near 31.8 MB. Framework caches remain
+resident, as in earlier milestones. The restored receipt implementation passed the full suite again
+on 21 September, and the app passed strict code-signature verification.
+
+The long idle check used revision `2759b59`, before the final receipt-only recovery fix. Its monitor
+waited 3,600 seconds; wall-clock timestamps spanned 09:03:36–10:31:07 on 16 September. Footprint
+went from 14.9 to 15.1 MB (**0.2 MB drift**), sampled CPU was 0.0%, cumulative CPU rose by 180 ms,
+and the `top` IDLEW samples were 2 and 3. The log recorded one completed sync attempt with zero
+requests; it does not identify which trigger woke it. These samples are not a full wakeup trace.
+The earlier five-cycle leak comparison also found zero leaks. Allocations/Leaks, Time Profiler,
+memgraphs and test results are retained outside the repo under `Spendable-profiles`.
+Real-first-sync footprint awaits owner acceptance.
 
 Storing a year of transactions — 5,984 rows across four accounts in eleven windows, through the real
-ingestion path — grows the live heap by **109 KB** in the milestone 4 suite. That is the number that matters: a version
-holding a year in memory would grow by several megabytes. Physical footprint moves by about 1 MB and
-is reported rather than asserted, because freed pages stay resident and never come back down.
+ingestion path — grew the live heap by **203 KB** in the 21 September suite. The test host's
+physical footprint rounded to 53 MB before and 54 MB after. Heap growth is asserted below 4 MB;
+physical footprint is reported because resident freed pages and other tests affect it.
 
 The milestone 3 engine benchmark worked out both figures in **4.3 ms** (slowest of 500 runs: 4.7 ms) on 40 accounts and 120 bills
 — several times more of each than the app will ever really hold, and with weekly bills, which are

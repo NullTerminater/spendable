@@ -109,8 +109,15 @@ waits for the current run before changing credentials. The replacement is staged
 encrypted Keychain item while ordinary reads still return the original. The staged payload is read
 back and verified, then one Keychain update promotes it. A failed stage or promotion leaves the
 original active and the new claim retained for Retry. Retry recognises an already-promoted
-credential if later database bookkeeping failed. Successful saving clears the durable rejection
-marker without requiring another request to fit today's budget. An old run's report cannot restore
+credential if later database bookkeeping failed. Each promoted credential carries an opaque receipt
+inside the encrypted Keychain payload. Startup and setup reconcile a new receipt with the database
+before syncing or offering another token: finish the connection metadata, clear the old rejection,
+and restart replacement history without changing request reservations. A crash after promotion
+therefore cannot leave an old rejection attached to a newly saved credential. Reconciliation is
+idempotent and needs no network request; if it cannot finish, the token field stays hidden.
+If the verified credential is saved but database bookkeeping fails, the screen says so and offers
+Check again; quitting does not lose that saved credential. Successful saving clears the durable
+rejection marker without requiring another request to fit today's budget. An old run's report cannot restore
 the repaired connection's rejection banner. Working connections do not offer replacement.
 
 ## Accounts and past spending arriving

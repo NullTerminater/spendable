@@ -1,6 +1,6 @@
 # Where this project is
 
-Updated 16 September 2026 after implementing milestone 4. Read `docs/PLAN.md` for the
+Updated 21 September 2026 after implementing and validating milestone 4. Read `docs/PLAN.md` for the
 owner's decisions, `docs/CONNECTING.md` for the implemented connection contract, and
 `docs/reviews/milestone-4-review.md` for its original review. The owner's new rule 13
 explicitly permits safe repair of rejected credentials in this milestone.
@@ -12,7 +12,7 @@ explicitly permits safe repair of rejected credentials in this milestone.
 | 1. Skeleton, signing, schema, manual accounts, window | Done, owner reviewed | `v0.1-skeleton` |
 | 2. Engine, disclosure, pay schedule, manual bills | Done, owner reviewed | `v0.2-engine` |
 | 3. SimpleFIN client, Keychain, budgeted sync | Done, owner reviewed | `v0.3-simplefin` |
-| 4. Setup, account corrections, connection repair, scheduler | Implemented; validation below; owner acceptance pending | Pending validation |
+| 4. Setup, account corrections, connection repair, scheduler | Implemented; validation below; owner acceptance pending | `v0.4-connected` |
 | 5–9. Detection, cards, menu number, widget, settings | Not started | — |
 
 Do not start milestone 5 until the owner has run and reviewed milestone 4.
@@ -30,7 +30,9 @@ Do not start milestone 5 until the owner has run and reviewed milestone 4.
   encrypted credential remains active through candidate read-back, then one atomic Keychain update
   promotes the verified candidate. The request budget survives replacement. History restarts while
   stored accounts, corrections and bills remain. A newly claimed credential rejected immediately
-  prompts a retry/diagnostic first; a deliberate replacement requires the in-app warning.
+  prompts a retry/diagnostic first; a deliberate replacement requires the in-app warning. An opaque
+  receipt stored with the encrypted credential lets startup/setup finish database bookkeeping after
+  a crash between Keychain promotion and the database commit, without another token or request.
 - `AppModel` owns the sole coordinator and scheduler. Launch, wake, local day change, Refresh and
   scheduled activity use it. The activity repeats every six hours with one hour of tolerance;
   five-hour automatic and six-hour launch gates remain separate. Completion runs exactly once.
@@ -45,13 +47,18 @@ Do not start milestone 5 until the owner has run and reviewed milestone 4.
 
 ## Verification
 
-The final suite passes **235 tests in 26 suites**. The normal checkout's signed Debug build also
-succeeds. The synthetic year test stores 5,984 rows in eleven windows with **109 KB** live-heap
+The final suite passes **238 tests in 26 suites** in the normal checkout on 21 September.
+Its signed Debug build succeeds and strict signature verification passes. The synthetic year test stores 5,984 rows in eleven windows with **203 KB** live-heap
 growth. Native synthetic checks exercised secure paste, invalid-token clearing and undo removal,
 duplicate acceptance, archive arithmetic, locked-Keychain retry, first-rejection replacement
 confirmation, and the unsaved-claim quit warning (including retention after the window closes).
 A real setup token has not been used by the builder; no real account contents were inspected or
-captured. The hour-long idle result is being recorded separately before the milestone tag.
+captured. The 16 September idle check completed: 14.9 → 15.1 MB, 0.0% sampled CPU,
+180 ms additional CPU time, and one logged sync attempt spending zero requests. This profile used
+`2759b59`, before the final receipt fix; launch/window/full-leak measurements were repeated on the
+21 September receipt build: 165 ms warm launch, 17.5 MB idle, at most 33.5 MB with the window,
+and zero leaks after five open/close cycles.
+See README for the measurement dates, revision boundaries and sampling limits.
 
 Build from the normal checkout:
 
@@ -81,7 +88,8 @@ never into chat. Review account guesses, correct one, then relaunch and check it
 builder's synthetic checks do not substitute for bank-specific behavior or the first Keychain
 consent dialog. Real-first-sync footprint remains unmeasured until that owner-run flow; report
 only the footprint number, never account contents. Replacing a working connection stays in
-milestone 9.
+milestone 9. Its disconnect implementation must clear `credential-generation-applied` alongside
+connection metadata, so an intentional deletion cannot look like missing tracked credentials.
 
 ## Earlier measurements
 
@@ -129,6 +137,11 @@ Do not rediscover these.
   metadata on the widget bundle and code signing refused it. Validation moved to a local `/private/tmp`
   checkout copied without extended attributes. The normal `~/Developer/spendable` checkout remains
   the delivery location; the temporary copy is only a validation workspace.
+
+- **Keep committed source in a persistent checkout.** `/private/tmp` was cleared during a paused
+  session, after its final receipt fix had passed tests but before delivery. The fix and final docs
+  were restored from the session into a persistent working copy and revalidated in the normal checkout. Temporary folders
+  are for build/measurement copies; preserve commits in the normal checkout before pausing.
 
 ## SimpleFIN, verified against the live server
 
