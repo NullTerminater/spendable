@@ -5,6 +5,10 @@ here changes a number the owner acts on, and a silently wrong rule is worse than
 `Tests/SpendableTests/SafeToSpendTests.swift` follows this document case for case, except that the
 two month-end anchor cases are in `Tests/SpendableTests/RecurringChargeTests.swift` (February 28th
 and 29th from a January 31st anchor), where the occurrence generator itself is tested.
+Milestone 4's classification, holdings and duplicate-account cases are also covered by
+`Tests/SpendableTests/AccountConnectionTests.swift`. Its additions follow
+`docs/reviews/milestone-4-review.md`; the milestone 2 review remains the historical authority for
+the original arithmetic, with the milestone 4 exceptions below stated explicitly.
 
 An earlier draft of this document was reviewed before any of it was built, by five independent
 readers working from the owner's specification, the plan and the schema. They found forty-two
@@ -38,21 +42,24 @@ therefore the same arithmetic by construction and cannot drift apart.
 | Held out — savings not counted | Savings the owner has not opted in | No | Not subtracted |
 | Held out — type not set | No type, guessed or confirmed | No | Not subtracted |
 | Held out — not US dollars | Currency is not USD | No | Not subtracted |
-| Held out — holds shares or funds | The bank reports holdings against it (`holdings_count` > 0) | No | Not subtracted |
+| Held out — loan | `guess_class` is `loan` | No | Not subtracted |
+| Held out — holds shares or funds | `guess_class` is `investment`, or the bank reports holdings (`holdings_count` > 0) | No | Not subtracted |
+| Held out — not looked inside yet | A synced checking or cash guess has no confirmed type and no dated holdings observation | No | Not subtracted |
 | Credit card | Type is credit | Never | See the card rule |
 | Archived | The owner put it away | No | **Subtracted**, and said so |
+| Possible duplicate, awaiting an answer | `merge_candidate_for` is set and `merge_answered_at` is not | No | **Subtracted**, and said so |
 
-Order matters, and the order shipped today is: archived, then currency, then investments, then no
-type, then credit, then the savings opt-in, then a dead connection, then age. Milestone 4 adds three
-steps in front of and around investments; `docs/reviews/milestone-4-review.md`
-(`holdings-before-a-guess-counts`) pins the final order — archived → superseded-pending-answer →
-currency → loan → investments → not-looked-inside-yet → no type → credit → savings opt-in → not
-updating → age — and none of those three new steps is built yet.
+Order matters. The order shipped in milestone 4 is: archived → superseded-pending-answer → currency
+→ loan → investments → not-looked-inside-yet → no type → credit → savings opt-in → not updating →
+age, as pinned by `docs/reviews/milestone-4-review.md` (`holdings-before-a-guess-counts`). A later
+reason cannot override an earlier one: an investment does not become an unknown account, for
+example, and neither confirming a type nor opting into savings bypasses an investment or loan class.
 
-**Shares and funds are never money.** An account the bank reports holdings against is held out of
-every total, whatever its name and whatever the owner has opted into, and no "count this" switch is
-offered for it at all — offering one would be a control that does nothing, and would suggest a share
-portfolio could become this month's spending money. The owner made this binding on 15 September
+**Shares and funds are never money.** An account classified as an investment by its name, or one
+the bank reports holdings against, is held out of every total, whatever the owner has opted into.
+No "count this" switch is offered for it at all — offering one would be a control that does nothing,
+and would suggest a share portfolio could become this month's spending money. The owner made this
+binding on 15 September
 (`docs/PLAN.md` rule 11). The investments test is applied before the type test, the credit test and
 the savings test, so neither an untyped share account nor a confirmed savings opt-in can reach past
 it; that ordering is also what stops the app asking a question whose "credit" answer would print
@@ -63,6 +70,18 @@ alone would have made it spendable (`docs/reviews/milestone-3-review.md`,
 `holdings-are-a-type-signal`). Its row reads: "Holds shares or funds, not money. What it's worth
 moves with the market, so it's never counted towards what you can spend — there's no switch for this
 one."
+
+**A loan is money owed, not an unanswered type question.** An account with `guess_class = loan`
+is held out with its bills and described as money owed. Neither loans nor investments are promoted
+under the number as unknown money that could make the total incomplete.
+
+**A checking or cash guess waits for a dated holdings answer.** A synced account with no
+`user_type`, an effective type of checking or cash, and no `holdings_observed_at` is held out until
+the app has seen a dated response containing its holdings field. An empty array in that dated
+answer is evidence of no holdings and releases this gate; a missing field leaves it waiting.
+The empty array in a balances-only response is not evidence and cannot release it. A new account
+therefore forces a dated request in the same sync, subject to the existing budget. This gate applies
+only to unconfirmed checking/cash guesses; known holdings still exclude a confirmed type too.
 
 **Stale means**: over 3 whole days for a hand-entered balance, over 2 for a synced one. Over 7 for
 either and the account stops counting. A balance dated in the future is treated as today.
@@ -82,11 +101,20 @@ and they are disclosed together (below). So a held-out account subtracts nothing
 and not the bills paid from it. The two are shown as one block with its net, never as two unrelated
 lines.
 
-**Archived accounts are the exception**, in the other direction. Archiving is the owner's own
-tidy-up action for an account they have closed. A closed account cannot pay anything, so a bill
-still pointing at one is money that will come out of an account that *is* counted — it stays
-subtracted, and the app says so and asks which account pays it now. An archived account is never
-named under the number and never raises a warning.
+**Archived accounts and unresolved duplicates are the exceptions**, in the other direction.
+Archiving is the owner's own tidy-up action for an account they have closed. A closed account cannot
+pay anything, so a bill still pointing at one is money that will come out of an account that *is*
+counted — it stays
+subtracted, and the app says so and asks which account pays it now. The archived balance itself
+raises no missing-account warning, but its unpaid dated bills are named under the number and in the
+disclosure.
+
+A manual account awaiting the answer to "Are these the same account?" has standing
+`supersededPendingAnswer`. Its balance contributes nothing while its bills remain subtracted and
+named; ordinary held-out semantics would remove the bills too and inflate the figure. This is the
+milestone 4 duplicate rule, not an assertion that the manual account has disappeared. Accepting a
+match moves its bills to the synced account and archives the manual row; rejecting the match clears
+the pending standing so the account is classified normally again.
 
 **Which balance.** The bank's available balance is used only when the owner has **confirmed** the
 account is a current account, never on a keyword guess, and never when it is larger than the plain
@@ -105,6 +133,7 @@ An obligation is subtracted when the money leaves the pool the figure just added
   from somewhere, and the only money on the table is money that is counted.
 - **Paying account is counted** → subtracted.
 - **Paying account is archived** → subtracted, and named.
+- **Paying account is an unresolved manual duplicate** → subtracted, and named while the answer is pending.
 - **Paying account is held out** → not subtracted, and disclosed with that account's balance.
 - **Paying account is a credit card** → see the card rule.
 
@@ -112,9 +141,10 @@ An obligation is subtracted when the money leaves the pool the figure just added
 above do not apply to a transfer: only the destination decides. A charge of kind `transfer` is money
 moving between the owner's own accounts, so what matters is where it lands. Into an account that is
 counted, it is not subtracted — the total already counts both sides. Into savings that is not
-counted, into any other held-out account, into a card, into an account the owner has archived, or
-into an account that no longer exists, it is subtracted: the money has left. With **no destination
-recorded** it is subtracted, and the app asks where it goes rather than guessing quietly.
+counted, into any other held-out account, into a card, into an account the owner has archived or
+whose duplicate question is pending, or into an account that no longer exists, it is subtracted:
+the money has left. With **no destination recorded** it is subtracted, and the app asks where it
+goes rather than guessing quietly.
 
 A scheduled payment to an outside company — a phone bill on autopay, rent, a utility — is a **bill**
 and is subtracted like any other. Being automatic does not make it stop being money leaving.
@@ -140,11 +170,13 @@ In order:
    card with no statement entered. Without this, four milestones would pass with a card's bills
    subtracted by nothing at all.
 
-A card's balance is described only as debt owed and never enters a total. For every card with a
-balance that is not zero, the app says: "You owe $1,180.00 on Chase Sapphire. No number here
-subtracts that — tell me its statement balance and the day it's due and I'll count the payment." A
-card with a zero balance is not mentioned. From milestone 6 the sentence is skipped for a card whose
-statement has been entered and whose due date has not passed, because the payment is then counted.
+A card's balance is described only as debt owed and never enters a total. For a confirmed card
+with a nonzero balance, the app says: "You owe $1,180.00 on Chase Sapphire. No number here subtracts
+that — tell me its statement balance and the day it's due and I'll count the payment." A keyword
+guess instead says: "I think Chase Sapphire is a credit card, going by its name, so I'm not counting
+it as money you have. It shows $1,180.00 owed. Is that right?" A card with a zero balance is not
+mentioned. From milestone 6 the statement prompt is skipped for a card whose statement has been
+entered and whose due date has not passed, because the payment is then counted.
 
 ## Turning a recurring charge into dated occurrences
 
@@ -245,13 +277,24 @@ and the owner acts differently on each.
 
 - **No accounts at all** → no figure. "I don't know yet. Add an account and I'll work out what you
   can spend."
-- **Accounts exist but not one can be counted** → no figure. "I can't work this out right now,"
+- **Accounts exist but not one can be counted, and the exception below does not apply** → no figure.
+  "I can't work this out right now,"
   then one line per account saying what it last held and when. No per-day allowance, no shortfall
   sentence, no "$0" anywhere. An account the owner has put away is not among those lines. The menu
   bar will show the icon and a warning and no number; that surface is milestone 7 and is not built —
   today the menu bar is a placeholder icon with an "Open Spendable" item. This holds however little
   the held-out accounts contain: accounts that exist but cannot be counted mean the app does not
   know, even when every one of them is empty and owes nothing.
+
+**Milestone 4 exception: unpaid bills on archived or unresolved duplicate accounts remain known.**
+When no account counts, the engine checks for a confirmed charge still paid from one of those
+accounts with an occurrence from the first of this month through the later of month-end and the
+day before the next payday. If one exists, it produces the applicable figures from a zero counted
+pool and applies the ordinary obligation rules. Archiving the last $3,160 account with $1,700 of
+unpaid bills therefore changes $1,460 to `$0 (balance: -$1,700)`; it cannot erase those bills by
+turning the whole answer unknown. The archived or pending bills are named under the number.
+Other held-out money remains excluded and disclosed. With no such dated occurrence, the original
+`nothingCountable` result still applies — including when every account is archived.
 
 ## Showing a figure
 
@@ -303,14 +346,16 @@ Rendered from the engine's own output, never re-derived by a view.
    the tests pin, so the document was corrected rather than the code. One line reverses it if the
    owner prefers the review's wording.
 4. **What I left out.** Accounts that were held out, each shown as one block with its own bills and
-   the net of the two — never as two unrelated lines. Two kinds of block also appear on the line
-   directly under the number, where a caveat cannot be missed: every account whose feed has stopped,
-   whatever its net, because a healthy-looking figure over data that died is the failure this app
-   most has to avoid; and any other held-out block whose net is negative, because a clean figure
-   with a hole behind it is worse than an untidy one. A block shown under the number is also listed
-   here, so the same sentence appears twice on the Overview screen. Then any account whose
-   "available" balance was ignored for looking like a credit line, cards with a balance and no
-   statement, bills still pointing at an account the owner has put away, bills with no due date,
+   the net of the two — never as two unrelated lines. A block is omitted only when both its balance
+   and bills are zero. Under the number, milestone 4 promotes blocks for stopped feeds, unknown
+   types, checking/cash guesses awaiting holdings, and non-USD accounts, plus excluded savings whose
+   net is negative. Loans and investments stay in the disclosure; they are not unknown spending
+   money. Foreign balances use their own currency, never a substituted US-dollar amount. A block
+   shown under the number is also listed here, so the same sentence appears twice on Overview.
+   Pending duplicate balances get their own under-number sentence, and dated bills paid from an
+   archived or pending duplicate account are named both there and in the disclosure. Then any
+   account whose "available" balance was ignored for looking like a credit line, confirmed or
+   guessed cards with a balance as described above, bills with no due date,
    and always: "This doesn't count your next paycheck." (the payday figure says "This is only money
    you have now. Your paycheck on October 3 isn't part of it.").
 
@@ -327,8 +372,9 @@ what it says when bills exist but none falls in the window.
 ## Where the arithmetic happens
 
 `SafeToSpendEngine.compute` is pure: accounts, charges, a pay schedule, and today, in; a figure and
-its explanation, out. It opens no database, reads no clock and imports no GRDB, so every rule above
-is tested with literal days and amounts and no test needs a database.
+its explanation, out. It opens no database, reads no clock and imports no GRDB, so its arithmetic
+can be tested with literal days and amounts. The M4 integration cases additionally use an in-memory
+database to verify that ingestion and owner actions supply those inputs correctly.
 
 The account table is a handful of rows and is fetched whole. The specification's rule that totals
 are SQL aggregates governs the **transaction** table, which is never read into memory, in this
