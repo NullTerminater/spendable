@@ -101,19 +101,26 @@ private struct ConnectionFlowServer: Sendable {
 private final class FlowCredentialStore: CredentialStore {
     struct State: Sendable {
         var credential: SimpleFINCredential?
+        var receipt: CredentialReceipt?
         var loadError: CredentialStoreError?
         var writesToFail = 0
         var saves = 0
         var replacements = 0
     }
     let state: Mutex<State>
-    init(_ credential: SimpleFINCredential? = nil, loadError: CredentialStoreError? = nil, writesToFail: Int = 0) {
-        state = Mutex(State(credential: credential, loadError: loadError, writesToFail: writesToFail))
+    init(_ credential: SimpleFINCredential? = nil, receipt: CredentialReceipt? = nil, loadError: CredentialStoreError? = nil, writesToFail: Int = 0) {
+        state = Mutex(State(credential: credential, receipt: receipt, loadError: loadError, writesToFail: writesToFail))
     }
     func load() throws -> SimpleFINCredential? {
         try state.withLock {
             if let error = $0.loadError { throw error }
             return $0.credential
+        }
+    }
+    func loadSaved() throws -> SavedCredential? {
+        try state.withLock { state in
+            if let error = state.loadError { throw error }
+            return state.credential.map { SavedCredential(credential: $0, receipt: state.receipt) }
         }
     }
     func save(_ credential: SimpleFINCredential) throws {
@@ -124,20 +131,23 @@ private final class FlowCredentialStore: CredentialStore {
                 throw CredentialStoreError.keychain(errSecInteractionNotAllowed, while: .writing)
             }
             $0.credential = credential
+            $0.receipt = CredentialReceipt(isReplacement: false)
         }
     }
     func replace(_ credential: SimpleFINCredential, expected: SimpleFINCredential) throws {
         try state.withLock {
             $0.replacements += 1
+            if $0.credential == credential { return }
             guard $0.credential == expected else { throw CredentialStoreError.verificationFailed }
             if $0.writesToFail > 0 {
                 $0.writesToFail -= 1
                 throw CredentialStoreError.keychain(errSecInteractionNotAllowed, while: .writing)
             }
             $0.credential = credential
+            $0.receipt = CredentialReceipt(isReplacement: true)
         }
     }
-    func delete() { state.withLock { $0.credential = nil } }
+    func delete() { state.withLock { $0.credential = nil; $0.receipt = nil } }
 }
 
 @Suite("Connecting and refreshing a bank", .serialized)
@@ -252,9 +262,13 @@ struct ConnectionFlowTests {
         }
         defer { server.close() }
         let original = server.credential("original")
-        let credentials = FlowCredentialStore(original, writesToFail: 1)
+        let originalReceipt = CredentialReceipt(isReplacement: false)
+        let credentials = FlowCredentialStore(original, receipt: originalReceipt, writesToFail: 1)
         let database = try AppDatabase.inMemory()
         try Self.connectState(database)
+        try await database.writer.write { db in
+            try SyncState.set(db, AppModel.appliedCredentialReceiptKey, originalReceipt.generation.uuidString)
+        }
         let model = AppModel(database: database, credentialStore: credentials, client: server.client)
         await model.refresh()
         guard case .rejected = model.banner else { Issue.record("Expected a rejected-connection banner"); return }
@@ -263,6 +277,8 @@ struct ConnectionFlowTests {
         await model.claimConnection(at: server.claimURL)
         #expect(model.unsavedConnection == server.credential())
         #expect(try credentials.load() == original)
+        #expect(try credentials.loadSaved()?.receipt == originalReceipt)
+        #expect(try await database.reader.read { try String.fetchOne($0, sql: "SELECT value FROM sync_state WHERE key = ?", arguments: [AppModel.appliedCredentialReceiptKey]) } == originalReceipt.generation.uuidString)
         #expect(model.banner == .unsaved)
         reject.withLock { $0 = false }
         await model.retrySavingConnection()
@@ -389,6 +405,106 @@ struct ConnectionFlowTests {
         }
         #expect(after == before)
         #expect(server.requests.map(\.method) == ["POST"])
+    }
+
+    @Test("a promoted replacement repairs its stale rejection without requests, even with recent balances and no budget", arguments: [false, true])
+    func promotedReplacementReconciles(openSetup: Bool) async throws {
+        let server = ConnectionFlowServer { _ in .init(body: ConnectionFlowServer.empty) }
+        defer { server.close() }
+        let database = try AppDatabase.inMemory()
+        let original = server.credential("original")
+        let oldReceipt = CredentialReceipt(isReplacement: false)
+        let credentials = FlowCredentialStore(original, receipt: oldReceipt)
+        let originalModel = AppModel(database: database, credentialStore: credentials, client: server.client)
+        await originalModel.prepareSetup()
+        try await database.writer.write { db in
+            try SyncState.setDate(db, SyncState.balancesSyncedAt, .now)
+            try SyncState.setDate(db, SyncState.transactionsPulledAt, .now)
+            try SyncState.setDate(db, SyncState.attemptedAt, .now)
+            try SyncState.set(db, "credential-rejected", "The old connection was rejected")
+            try SyncState.clear(db, "awaiting-first-balance")
+            try SyncState.setInteger(db, "unverified-replacement-approved", 1)
+            try BackfillProgress(nextWindowIndex: 11, consecutiveEmptyWindows: 2, state: .exhausted, coveredBackTo: "2025-07-01").save(db)
+            for _ in 0..<RequestBudget.maxInRollingDay { try RequestBudget.reserve(db, purpose: .refresh) }
+        }
+        let budgetBefore = try await database.reader.read { db in
+            try String.fetchOne(db, sql: "SELECT value FROM sync_state WHERE key = ?", arguments: [RequestBudget.timestampsKey])
+        }
+        // Simulate termination after atomic promotion, before AppModel's database transaction.
+        try credentials.replace(server.credential(), expected: original)
+        let replacementReceipt = try #require(try credentials.loadSaved()?.receipt)
+        #expect(replacementReceipt != oldReceipt)
+        let reopened = AppModel(database: database, credentialStore: credentials, client: server.client)
+        if openSetup { await reopened.prepareSetup() }
+        else { await reopened.refresh(trigger: .launch) }
+        #expect(server.requests.isEmpty)
+        #expect(reopened.banner == nil)
+        #expect(reopened.setupState != .ready)
+        try await database.reader.read { (db: Database) throws -> Void in
+            #expect(try String.fetchOne(db, sql: "SELECT value FROM sync_state WHERE key = 'credential-rejected'") == nil)
+            #expect(try SyncState.integer(db, "awaiting-first-balance") == 1)
+            #expect(try SyncState.integer(db, "unverified-replacement-approved") == 0)
+            #expect(try SyncState.date(db, SyncState.transactionsPulledAt) == nil)
+            #expect(try BackfillProgress.load(db) == BackfillProgress())
+            #expect(try String.fetchOne(db, sql: "SELECT value FROM sync_state WHERE key = ?", arguments: [AppModel.appliedCredentialReceiptKey]) == replacementReceipt.generation.uuidString)
+            #expect(try String.fetchOne(db, sql: "SELECT value FROM sync_state WHERE key = ?", arguments: [RequestBudget.timestampsKey]) == budgetBefore)
+        }
+        let progressed = BackfillProgress(nextWindowIndex: 2, consecutiveEmptyWindows: 0, state: .running, coveredBackTo: "2026-08-03")
+        try await database.writer.write { db in try progressed.save(db) }
+        let reopenedAgain = AppModel(database: database, credentialStore: credentials, client: server.client)
+        await reopenedAgain.prepareSetup()
+        #expect(try await database.reader.read { try BackfillProgress.load($0) } == progressed)
+        #expect(server.requests.isEmpty)
+    }
+
+    @Test("a receipt bookkeeping failure withholds replacement and retries the saved credential locally")
+    func receiptFailureFailsClosed() async throws {
+        let server = ConnectionFlowServer { _ in .init(body: ConnectionFlowServer.empty) }
+        defer { server.close() }
+        let database = try AppDatabase.inMemory()
+        let receipt = CredentialReceipt(isReplacement: true)
+        let credentials = FlowCredentialStore(server.credential(), receipt: receipt)
+        try await database.writer.write { db in
+            try SyncState.setDate(db, SyncState.connectedAt, .now)
+            try SyncState.set(db, "credential-rejected", "The old connection was rejected")
+            for _ in 0..<RequestBudget.maxInRollingDay { try RequestBudget.reserve(db, purpose: .refresh) }
+            try db.execute(sql: """
+                CREATE TRIGGER refuse_receipt BEFORE INSERT ON sync_state
+                WHEN NEW.key = 'credential-generation-applied'
+                BEGIN SELECT RAISE(ABORT, 'synthetic bookkeeping failure'); END
+                """)
+        }
+        let model = AppModel(database: database, credentialStore: credentials, client: server.client)
+        await model.prepareSetup()
+        #expect(model.setupState == .connected)
+        #expect(model.setupMessage?.contains("couldn't finish updating its connection records") == true)
+        await model.claimConnection(at: server.claimURL)
+        #expect(server.requests.isEmpty)
+        #expect(try credentials.loadSaved()?.receipt == receipt)
+        #expect(try await database.reader.read { try String.fetchOne($0, sql: "SELECT value FROM sync_state WHERE key = 'credential-rejected'") } != nil)
+        try await database.writer.write { db in try db.execute(sql: "DROP TRIGGER refuse_receipt") }
+        await model.refresh()
+        #expect(model.banner == nil)
+        #expect(server.requests.isEmpty)
+        #expect(try await database.reader.read { try String.fetchOne($0, sql: "SELECT value FROM sync_state WHERE key = ?", arguments: [AppModel.appliedCredentialReceiptKey]) } == receipt.generation.uuidString)
+    }
+
+    @Test("a tracked credential with missing receipt fails closed instead of offering another token")
+    func missingReceiptFailsClosed() async throws {
+        let server = ConnectionFlowServer { _ in .init(body: ConnectionFlowServer.empty) }
+        defer { server.close() }
+        let database = try AppDatabase.inMemory()
+        try await database.writer.write { db in
+            try SyncState.setDate(db, SyncState.connectedAt, .now)
+            try SyncState.set(db, AppModel.appliedCredentialReceiptKey, UUID().uuidString)
+            try SyncState.set(db, "credential-rejected", "The old connection was rejected")
+        }
+        let model = AppModel(database: database, credentialStore: FlowCredentialStore(server.credential()), client: server.client)
+        await model.prepareSetup()
+        #expect(model.setupState == .keychainUnavailable && model.banner == .keychain)
+        await model.claimConnection(at: server.claimURL)
+        await model.refresh()
+        #expect(server.requests.isEmpty)
     }
 
     @Test("a new account forces a dated answer even during a balances-only run")

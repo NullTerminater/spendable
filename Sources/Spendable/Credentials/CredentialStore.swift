@@ -82,10 +82,29 @@ enum CredentialStoreError: Error, Equatable {
     }
 }
 
+/// An opaque operation receipt, unrelated to the credential's contents. It travels inside the
+/// encrypted item so promoting a credential and identifying that promotion are one atomic write.
+struct CredentialReceipt: Codable, Equatable, Sendable {
+    let generation: UUID
+    let isReplacement: Bool
+
+    init(generation: UUID = UUID(), isReplacement: Bool) {
+        self.generation = generation
+        self.isReplacement = isReplacement
+    }
+}
+
+struct SavedCredential: Equatable, Sendable {
+    let credential: SimpleFINCredential
+    let receipt: CredentialReceipt?
+}
+
 /// Where the SimpleFIN credential lives. The app has exactly one real implementation (Keychain)
 /// and one in-memory implementation for tests and previews.
 protocol CredentialStore: Sendable {
     func load() throws -> SimpleFINCredential?
+    /// Credential and receipt must come from the same read, never two independently read items.
+    func loadSaved() throws -> SavedCredential?
     /// Writes the credential, then reads it back and compares before returning. Throws if the
     /// read-back differs, so a caller never believes a credential is stored when it is not.
     func save(_ credential: SimpleFINCredential) throws
@@ -95,6 +114,10 @@ protocol CredentialStore: Sendable {
 }
 
 extension CredentialStore {
+    func loadSaved() throws -> SavedCredential? {
+        try load().map { SavedCredential(credential: $0, receipt: nil) }
+    }
+
     func replace(_ credential: SimpleFINCredential, expected: SimpleFINCredential) throws {
         let active = try load()
         if active == credential { return }
@@ -104,16 +127,28 @@ extension CredentialStore {
 }
 
 final class InMemoryCredentialStore: CredentialStore {
-    private let state = Mutex<SimpleFINCredential?>(nil)
+    private let state = Mutex<SavedCredential?>(nil)
 
     init() {}
 
     func load() throws -> SimpleFINCredential? {
+        state.withLock { $0?.credential }
+    }
+
+    func loadSaved() throws -> SavedCredential? {
         state.withLock { $0 }
     }
 
     func save(_ credential: SimpleFINCredential) throws {
-        state.withLock { $0 = credential }
+        state.withLock { $0 = SavedCredential(credential: credential, receipt: CredentialReceipt(isReplacement: false)) }
+    }
+
+    func replace(_ credential: SimpleFINCredential, expected: SimpleFINCredential) throws {
+        try state.withLock {
+            if $0?.credential == credential { return }
+            guard $0?.credential == expected else { throw CredentialStoreError.verificationFailed }
+            $0 = SavedCredential(credential: credential, receipt: CredentialReceipt(isReplacement: true))
+        }
     }
 
     func delete() throws {
@@ -147,9 +182,18 @@ final class KeychainCredentialStore: CredentialStore {
         var base: String
         var user: String
         var password: String
+        var receipt: CredentialReceipt?
     }
 
     func load() throws -> SimpleFINCredential? {
+        try loadSaved()?.credential
+    }
+
+    func loadSaved() throws -> SavedCredential? {
+        try loadPayload().map(Self.decode)
+    }
+
+    private func loadPayload() throws -> Data? {
         var query = baseQuery()
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -158,7 +202,7 @@ final class KeychainCredentialStore: CredentialStore {
         switch status {
         case errSecSuccess:
             guard let data = result as? Data else { throw CredentialStoreError.encoding }
-            return try Self.decode(data)
+            return data
         case errSecItemNotFound:
             return nil
         default:
@@ -167,7 +211,8 @@ final class KeychainCredentialStore: CredentialStore {
     }
 
     func save(_ credential: SimpleFINCredential) throws {
-        let data = try Self.encode(credential)
+        let saved = SavedCredential(credential: credential, receipt: CredentialReceipt(isReplacement: false))
+        let data = try Self.encode(saved)
         let query = baseQuery()
         let attributes: [String: Any] = [kSecValueData as String: data]
         var status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
@@ -182,13 +227,13 @@ final class KeychainCredentialStore: CredentialStore {
 
         // The read-back is part of saving, so a keychain that refuses it is reported as a failed
         // save. Otherwise the owner is told to retry a read they never asked for.
-        let readBack: SimpleFINCredential?
+        let readBack: SavedCredential?
         do {
-            readBack = try load()
+            readBack = try loadSaved()
         } catch CredentialStoreError.keychain(let status, _) {
             throw CredentialStoreError.keychain(status, while: .writing)
         }
-        guard let readBack, readBack == credential else {
+        guard let readBack, readBack == saved else {
             throw CredentialStoreError.verificationFailed
         }
     }
@@ -197,11 +242,11 @@ final class KeychainCredentialStore: CredentialStore {
     /// back while the original remains active; one atomic SecItemUpdate then promotes verified
     /// bytes. A failed staging/read/promotion leaves the original connection usable.
     func replace(_ credential: SimpleFINCredential, expected: SimpleFINCredential) throws {
-        let active = try load()
-        if active == credential { return }
-        guard active == expected else { throw CredentialStoreError.verificationFailed }
-        let original = try Self.encode(expected)
-        let candidate = try Self.encode(credential)
+        guard let original = try loadPayload() else { throw CredentialStoreError.verificationFailed }
+        let active = try Self.decode(original)
+        if active.credential == credential { return }
+        guard active.credential == expected else { throw CredentialStoreError.verificationFailed }
+        let candidate = try Self.encode(SavedCredential(credential: credential, receipt: CredentialReceipt(isReplacement: true)))
         var staged = try JSONSerialization.jsonObject(with: original) as! [String: Any]
         staged["replacement"] = try JSONSerialization.jsonObject(with: candidate)
         let stagedData = try JSONSerialization.data(withJSONObject: staged, options: [.sortedKeys])
@@ -246,11 +291,13 @@ final class KeychainCredentialStore: CredentialStore {
         ]
     }
 
-    private static func encode(_ credential: SimpleFINCredential) throws -> Data {
+    private static func encode(_ saved: SavedCredential) throws -> Data {
+        let credential = saved.credential
         let payload = Payload(
             base: credential.baseURL.absoluteString,
             user: credential.username,
-            password: credential.password)
+            password: credential.password,
+            receipt: saved.receipt)
         do {
             return try JSONEncoder().encode(payload)
         } catch {
@@ -258,11 +305,11 @@ final class KeychainCredentialStore: CredentialStore {
         }
     }
 
-    private static func decode(_ data: Data) throws -> SimpleFINCredential {
+    private static func decode(_ data: Data) throws -> SavedCredential {
         guard let payload = try? JSONDecoder().decode(Payload.self, from: data),
               let url = URL(string: payload.base),
               let credential = SimpleFINCredential(baseURL: url, username: payload.user, password: payload.password)
         else { throw CredentialStoreError.encoding }
-        return credential
+        return SavedCredential(credential: credential, receipt: payload.receipt)
     }
 }

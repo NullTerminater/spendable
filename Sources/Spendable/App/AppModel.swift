@@ -40,6 +40,9 @@ final class AppModel {
     @ObservationIgnored private var replacementOf: SimpleFINCredential?
     @ObservationIgnored private var lastClaimAttempt: Date?
     @ObservationIgnored private var refreshing = 0
+    @ObservationIgnored private var hasReconciledCredential = false
+    nonisolated static let appliedCredentialReceiptKey = "credential-generation-applied"
+    private enum ReconciliationFailure: Error { case bookkeeping }
     private static let log = Logger(subsystem: StorePaths.bundleIdentifier, category: "startup")
 
     init(credentialStore: (any CredentialStore)? = nil, client: SimpleFINClient = SimpleFINClient()) {
@@ -90,13 +93,14 @@ final class AppModel {
                 syncCoordinator = SyncCoordinator(database: opened, client: client, credentials: credentialStore)
                 network = NetworkReadiness()
                 Self.log.info("database ready")
+                try await restoreRejectionState()
+                let reconciled = await ensureCredentialReconciled()
                 let connected = try await opened.reader.read { db in
                     try SyncState.date(db, SyncState.connectedAt) != nil
                 }
-                try await restoreRejectionState()
                 if connected {
                     startScheduling()
-                    await refresh(trigger: .launch)
+                    if reconciled { await refresh(trigger: .launch) }
                 }
             } catch {
                 startupError = "Spendable couldn't open its storage. Quit and open it again; if this keeps happening, tell the developer."
@@ -111,20 +115,7 @@ final class AppModel {
         setupState = .checking
         do {
             try await restoreRejectionState()
-            let existing = try await Task.detached { [credentialStore] in try credentialStore.load() }.value
-            if existing != nil, let database {
-                // A claim is durable once the verified Keychain write succeeds. Repair the small
-                // crash gap before its database bookkeeping without consuming another token.
-                let repaired = try await database.writer.write { db in
-                    guard try SyncState.date(db, SyncState.connectedAt) == nil else { return false }
-                    try SyncState.setDate(db, SyncState.connectedAt, .now)
-                    if try SyncState.date(db, SyncState.balancesSyncedAt) == nil {
-                        try SyncState.setInteger(db, "awaiting-first-balance", 1)
-                    }
-                    return true
-                }
-                if repaired { try await restoreRejectionState(); startScheduling() }
-            }
+            let existing = try await loadAndReconcileCredential()?.credential
             if hasRejectedConnection, let existing {
                 if awaitingFirstBalance && !unverifiedReplacementApproved {
                     replacementOf = nil
@@ -143,8 +134,94 @@ final class AppModel {
                 if banner == .keychain { banner = nil }
             }
         } catch {
+            presentReconciliationFailure(error)
+        }
+    }
+
+    /// A receipt survives the crash between Keychain promotion and this database transaction.
+    /// Applying it consumes no requests and never replenishes the rolling request budget.
+    private func reconcile(_ saved: SavedCredential?, force: Bool = false, replacing: Bool = false) async throws -> Bool {
+        guard let database else { throw ReconciliationFailure.bookkeeping }
+        do {
+            return try await database.writer.write { db in
+                let applied = try String.fetchOne(db, sql: "SELECT value FROM sync_state WHERE key = ?", arguments: [Self.appliedCredentialReceiptKey])
+                guard let saved else {
+                    guard applied == nil else { throw CredentialStoreError.verificationFailed }
+                    return false
+                }
+                let receipt = saved.receipt
+                // A tracked credential must never silently fall back to legacy/unidentified data.
+                guard receipt != nil || applied == nil else { throw CredentialStoreError.verificationFailed }
+                let missingConnection = try SyncState.date(db, SyncState.connectedAt) == nil
+                let unapplied = receipt.map { $0.generation.uuidString != applied } ?? false
+                guard force || unapplied || missingConnection else { return false }
+                if missingConnection { try SyncState.setDate(db, SyncState.connectedAt, .now) }
+                if force || unapplied {
+                    try SyncState.clear(db, "credential-rejected")
+                    try SyncState.setInteger(db, "awaiting-first-balance", 1)
+                    try SyncState.clear(db, "unverified-replacement-approved")
+                    if replacing || receipt?.isReplacement == true {
+                        try BackfillProgress().save(db)
+                        try SyncState.clear(db, SyncState.transactionsPulledAt)
+                    }
+                } else if try SyncState.date(db, SyncState.balancesSyncedAt) == nil {
+                    try SyncState.setInteger(db, "awaiting-first-balance", 1)
+                }
+                if let receipt { try SyncState.set(db, Self.appliedCredentialReceiptKey, receipt.generation.uuidString) }
+                return true
+            }
+        } catch let error as CredentialStoreError {
+            throw error
+        } catch {
+            throw ReconciliationFailure.bookkeeping
+        }
+    }
+
+    private func loadAndReconcileCredential() async throws -> SavedCredential? {
+        let generation = connectionGeneration
+        let saved = try await Task.detached { [credentialStore] in try credentialStore.loadSaved() }.value
+        guard generation == connectionGeneration, !isSaving else { throw CancellationError() }
+        let changed = try await reconcile(saved)
+        guard generation == connectionGeneration, !isSaving else { throw CancellationError() }
+        hasReconciledCredential = true
+        if changed {
+            banner = nil
+            syncMessage = nil
+            setupMessage = nil
+            try await restoreRejectionState()
+            startScheduling()
+        }
+        return saved
+    }
+
+    private func ensureCredentialReconciled() async -> Bool {
+        guard !isSaving else { return false }
+        if hasReconciledCredential { return true }
+        do {
+            _ = try await loadAndReconcileCredential()
+            return true
+        } catch {
+            presentReconciliationFailure(error)
+            return false
+        }
+    }
+
+    private func presentReconciliationFailure(_ error: Error) {
+        guard !(error is CancellationError) else { return }
+        hasReconciledCredential = false
+        replacementOf = nil
+        if error is ReconciliationFailure {
+            // The saved credential remains usable. Check again retries local bookkeeping before
+            // any network request; a database failure must never offer another setup token.
+            setupState = .connected
+            banner = nil
+            let message = "Your connection is saved, but Spendable couldn't finish updating its connection records. Check again to retry; don't make another setup token."
+            setupMessage = message
+            syncMessage = message
+        } else {
             setupState = .keychainUnavailable
             banner = .keychain
+            setupMessage = nil
         }
     }
 
@@ -224,7 +301,7 @@ final class AppModel {
 
     /// Retry only saves the retained claim. It never asks the server to claim a token twice.
     func retrySavingConnection() async {
-        guard !isSaving, let credential = unsavedConnection, let database else { return }
+        guard !isSaving, let credential = unsavedConnection, database != nil else { return }
         isSaving = true
         connectionGeneration += 1
         await syncCoordinator?.pauseForCredentialChange()
@@ -236,18 +313,10 @@ final class AppModel {
                 if let replacementOf { try credentialStore.replace(credential, expected: replacementOf) }
                 else { try credentialStore.save(credential) }
             }.value
-            try await database.writer.write { db in
-                if try SyncState.date(db, SyncState.connectedAt) == nil {
-                    try SyncState.setDate(db, SyncState.connectedAt, Date())
-                }
-                try SyncState.clear(db, "credential-rejected")
-                try SyncState.setInteger(db, "awaiting-first-balance", 1)
-                try SyncState.clear(db, "unverified-replacement-approved")
-                if isReplacement {
-                    try BackfillProgress().save(db)
-                    try SyncState.clear(db, SyncState.transactionsPulledAt)
-                }
-            }
+            let saved = try await Task.detached { [credentialStore] in try credentialStore.loadSaved() }.value
+            guard saved?.credential == credential else { throw CredentialStoreError.verificationFailed }
+            _ = try await reconcile(saved, force: true, replacing: isReplacement)
+            hasReconciledCredential = true
             unsavedConnection = nil
             replacementOf = nil
             hasRejectedConnection = false
@@ -262,14 +331,22 @@ final class AppModel {
             Task { await refresh() }
         } catch {
             await syncCoordinator?.resumeAfterCredentialChange()
-            setupState = .unsaved
-            banner = .unsaved
-            setupMessage = nil
+            if error is ReconciliationFailure {
+                // Read-back already verified the saved credential and its durable receipt. A quit
+                // cannot lose it; the next local retry/relaunch can finish this transaction.
+                unsavedConnection = nil
+                presentReconciliationFailure(error)
+            } else {
+                setupState = .unsaved
+                banner = .unsaved
+                setupMessage = nil
+            }
         }
     }
 
     func refresh(trigger: SyncPolicy.Trigger = .manual) async {
         guard let coordinator = syncCoordinator else { return }
+        guard await ensureCredentialReconciled() else { return }
         if trigger == .launch || trigger == .wake || trigger == .dayChanged, let network {
             guard await network.waitUntilOnline() else { return }
         }
@@ -361,6 +438,10 @@ final class AppModel {
         activity.repeats = true
         activity.schedule { [weak self, coordinator] completion in
             Task { @MainActor [weak self] in
+                if let self, !(await self.ensureCredentialReconciled()) {
+                    completion(.finished)
+                    return
+                }
                 if let self {
                     self.refreshing += 1
                     self.isSyncing = true
@@ -433,11 +514,16 @@ extension AppModel {
         if name != "setup" {
             let credential = SimpleFINCredential(baseURL: URL(string: "https://simplefin.invalid/simplefin")!, username: "fixture", password: "fixture")!
             try? credentialStore.save(credential)
+            if let saved = try? credentialStore.loadSaved() {
+                _ = try? await reconcile(saved)
+                hasReconciledCredential = true
+            }
             try? await database.writer.write { db in
                 try SyncState.setDate(db, SyncState.connectedAt, now)
                 if name != "fresh-rejected" {
                     try SyncState.setDate(db, SyncState.balancesSyncedAt, now)
                     try SyncState.setDate(db, SyncState.transactionsPulledAt, now)
+                    try SyncState.clear(db, "awaiting-first-balance")
                 }
             }
             startScheduling()

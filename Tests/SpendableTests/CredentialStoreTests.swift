@@ -52,18 +52,25 @@ struct CredentialStoreTests {
         let first = try #require(SimpleFINCredential(baseURL: Self.base, username: "demo", password: "one"))
         try store.save(first)
         #expect(try store.load() == first)
+        let originalReceipt = try #require(try store.loadSaved()?.receipt)
+        #expect(!originalReceipt.isReplacement)
 
         let second = try #require(SimpleFINCredential(baseURL: Self.base, username: "demo", password: "two"))
         try store.replace(second, expected: first)
         #expect(try store.load() == second)
+        let replacementReceipt = try #require(try store.loadSaved()?.receipt)
+        #expect(replacementReceipt.isReplacement)
+        #expect(replacementReceipt.generation != originalReceipt.generation)
         // Retry after an already completed promotion is harmless.
         try store.replace(second, expected: first)
         #expect(try store.load() == second)
+        #expect(try store.loadSaved()?.receipt == replacementReceipt)
         // A stale setup screen cannot replace a credential it did not inspect.
         #expect(throws: CredentialStoreError.verificationFailed) {
             try store.replace(first, expected: first)
         }
         #expect(try store.load() == second)
+        #expect(try store.loadSaved()?.receipt == replacementReceipt)
 
         try store.delete()
         #expect(try store.load() == nil)
