@@ -3,7 +3,8 @@
 Reviewed 28 September 2026. The review is `docs/reviews/milestone-5-review.md` (28 decisions). Where
 this document and that review disagree, the review wins. PLAN's numbered owner decisions bind both.
 The one departure from PLAN's milestone 5 text, "Maybe cancelled?" no longer removing a bill, is put
-to the owner as an open question at the end of the review. Nothing here is implemented yet.
+to the owner as an open question at the end of the review. It is implemented but not yet compiled
+or tested; see the review's implementation addendum for the known gaps.
 
 ## The rule every other rule obeys
 

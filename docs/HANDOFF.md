@@ -5,8 +5,10 @@ Updated 28 September 2026 for transfer to another AI. **Read
 review.** Milestone 4 is implemented and validated; the owner ran it and confirmed persistence
 after quitting/reopening, then explicitly authorized milestone 5. On 28 September `docs/DETECTION.md`
 was reviewed by two independent readers. The decisions are in `docs/reviews/milestone-5-review.md`,
-and the contract was rewritten to match. M5 has no implementation, migration, tests or
-measurements yet.
+and the contract was rewritten to match. The same day M5 was implemented in a cloud session with
+**no Xcode**: schema v5, detection, engine payments, the paged Bills screen, Debug fixtures and
+tests all exist, but **none of it has been compiled or run**. Nothing is measured and there is no
+tag. See "Milestone 5: what the owner's Mac must do next" below.
 
 Read `docs/PLAN.md` for the
 owner's decisions, `docs/CONNECTING.md` for the implemented connection contract, and
@@ -21,11 +23,43 @@ explicitly permits safe repair of rejected credentials in this milestone.
 | 2. Engine, disclosure, pay schedule, manual bills | Done, owner reviewed | `v0.2-engine` |
 | 3. SimpleFIN client, Keychain, budgeted sync | Done, owner reviewed | `v0.3-simplefin` |
 | 4. Setup, account corrections, connection repair, scheduler | Built and validated; owner ran app and confirmed persistence | `v0.4-connected` |
-| 5. Recurring-charge detection | Authorized; contract reviewed 28 Sep, not implemented | — |
+| 5. Recurring-charge detection | Contract reviewed; implemented 28 Sep, never compiled or tested | — |
 | 6–9. Cards, menu number, widget, settings | Not started | — |
 
-Milestone 5 is authorized and its contract review is complete. Implement from the review. Do not
-start milestone 6 until the owner has seen milestone 5 run.
+Milestone 5 is authorized, reviewed and implemented, but unverified. Do not start milestone 6
+until the owner has seen milestone 5 run.
+
+## Milestone 5: what the owner's Mac must do next
+
+The code was written without a compiler, then reviewed by hand. That review found no definite
+compile errors and fixed six logic bugs. Expect to have to fix some compile errors anyway. In
+order:
+
+1. `scripts/bootstrap.sh`, then build and test with `-derivedDataPath DerivedData`. Fix compile
+   errors first, keeping behaviour. The new suites are `DetectionSchemaTests`, `MerchantKeyTests`,
+   `SeriesFinderTests`, `DetectionIngestTests`, `DetectionPassTests` and `BankPaymentEngineTests`.
+   A failing expectation is a finding to diagnose, never one to loosen.
+2. Run the synthetic acceptance in a scratch container. **Never** run it against the real app or
+   its container:
+
+   ```bash
+   open -n --env SPENDABLE_DEBUG_CONTAINER=/tmp/spendable-m5-seed --env SPENDABLE_DEBUG_DETECTION=seed --env SPENDABLE_DEBUG_SCREEN=bills --env SPENDABLE_DEBUG_OPEN_WINDOW=1 DerivedData/Build/Products/Debug/Spendable.app
+   ```
+
+   Expected results:
+   - Spotify appears once, "went up from $9.99 to $10.99".
+   - There are two Apple rows.
+   - The gym is flagged "maybe cancelled?" and is still counted.
+   - The move to savings is under "Looks like a move between your accounts".
+   - Prime and Costco are yearly suggestions.
+   - The newspaper is a suggestion.
+   - Paydays and the marketplace never appear.
+3. Measure in a fresh scratch container with `SPENDABLE_DEBUG_DETECTION=bench`, then read
+   `measurements.log`. It records the full pass over 6,000 rows, the 30-row incremental pass and the
+   query plan. Then measure scrolling 300 rows, idle and leaks as in earlier milestones.
+4. Update README and this file with exact numbers and limits, cut the annotated `v0.5-detection`
+   tag, and show the owner. Also ask the owner the open question in the milestone 5 review (does a
+   bill that looks cancelled stop counting?).
 
 ## What milestone 4 now contains
 
