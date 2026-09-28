@@ -42,12 +42,14 @@ xcodebuild -project Spendable.xcodeproj -scheme Spendable -destination 'platform
 - Do not start the next milestone until the owner has seen the current one run.
 - Read `docs/HANDOFF.md` before writing any code. It says which milestones are built, what milestone 4 contains, which contracts have been superseded, and which traps cost real time to find.
 - The plan and every decision the owner has made is `docs/PLAN.md`. Its numbered decision list binds every other document — including rule 11 (2026-09-15: an account holding shares or funds is never counted, and no switch is offered) and the negative-headline rule above.
-- Then read what the work needs. There are six documents and three reviews, and they are not interchangeable:
+- Then read what the work needs. There are seven documents and four reviews, and they are not interchangeable:
   - `docs/HANDOFF.md` — where the project actually is: milestones 1–3 built, measured and tagged; milestone 4 implemented; validation and owner acceptance. Start here.
   - `docs/ENGINE.md` — the safe-to-spend contract (milestone 2, shipped).
   - `docs/SYNC.md` — the SimpleFIN client and sync contract (milestone 3, shipped).
   - `docs/CONNECTING.md` — the milestone 4 implementation contract, including owner-approved rejected-credential repair (PLAN rule 13). Otherwise: **where it and `docs/reviews/milestone-4-review.md` disagree, the review wins.** Never implement a rule from it without checking the review first.
   - `docs/reviews/milestone-4-review.md` — the authority for the rest of milestone 4: 27 decisions, 8 findings rejected, 25 test cases, kept verbatim. Read it before writing any more milestone 4 code.
+  - `docs/DETECTION.md` — the milestone 5 contract (recurring-charge detection), rewritten after its review. Not implemented yet.
+  - `docs/reviews/milestone-5-review.md` — the authority for milestone 5: 28 decisions, 7 findings rejected, 30 test cases and one open owner question. It wins over DETECTION.md and PLAN's milestone 5 text. Read it before writing any milestone 5 code.
   - `docs/reviews/milestone-2-review.md` and `docs/reviews/milestone-3-review.md` — why several shipped rules look odd.
   - `README.md` — how to build, how to verify each milestone, and the measured numbers.
 - Every contract is written as a document, attacked by several independent readers, and only then implemented. That practice has found, in every design so far, at least one rule that would have silently produced a wrong number about the owner's money. Do the same for milestone 5 (subscription detection) and milestone 6 (credit cards).

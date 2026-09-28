@@ -292,6 +292,16 @@ Guess-vs-ask (line 95) resolved as 'guess visibly, never silently': keyword-back
 
 ### Milestone 5 — Recurring-charge detection, confirm/dismiss UI, subscription totals
 
+**Superseded in part (28 September 2026).** `docs/DETECTION.md` and
+`docs/reviews/milestone-5-review.md` govern this milestone. Where they differ from the text below,
+they win:
+
+- **D:** keyword transfers are replaced; see decision 3 and review 18.
+- **F:** a "maybe cancelled?" bill keeps counting until the owner marks it cancelled (review 2).
+  This is put to the owner as an open question.
+- **G:** the max-rowid cursor is replaced by a trigger-fed work queue (review 5).
+- **Acceptance:** the flagged gym row does not leave the totals.
+
 **Scope**
 
 A. Merchant normalization on settled, negative-amount rows: source payee else description, memo secondary; uppercase + ASCII-fold; strip processor prefixes (SQ *, SQU*, TST*, PAYPAL *, PP*, GOOGLE *, APL*, AMZN Mktp US*, WWW., POS, DEBIT CARD PURCHASE, CHECKCARD MMDD), digit-bearing tokens, trailing city/state pairs, URL tails except APPLE.COM/BILL -> APPLE; keep product words (PRIME, KINDLE, AUDIBLE, MUSIC); first three significant tokens; positive same-merchant amount within 30 days of a charge treated as a refund. Written to merchant_normalized at insert time (M3 already reserves the column; this milestone fills and backfills it).
