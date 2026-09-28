@@ -15,6 +15,8 @@ final class AppModel {
     private(set) var store: SpendableStore?
     private(set) var startupError: String?
     private(set) var syncCoordinator: SyncCoordinator?
+    /// Bill detection. The only owner of the detection worker (milestone-5-review decision 6).
+    private(set) var detectionWorker: DetectionWorker?
     private(set) var unsavedConnection: SimpleFINCredential?
     private(set) var setupState: SetupState = .checking
     private(set) var setupMessage: String?
@@ -90,7 +92,18 @@ final class AppModel {
                 }.value
                 database = opened
                 store = SpendableStore(database: opened)
-                syncCoordinator = SyncCoordinator(database: opened, client: client, credentials: credentialStore)
+                let detection = DetectionWorker(database: opened)
+                detectionWorker = detection
+                store?.detectionRequested = { Task { _ = await detection.drain() } }
+                syncCoordinator = SyncCoordinator(database: opened, client: client, credentials: credentialStore,
+                                                  detection: detection)
+                // Unfinished detection work from a crash or the upgrade's backfill, off the main
+                // actor and not awaited, so it never delays the launch poll (decision 6).
+                Task.detached(priority: .utility) {
+                    if (try? await opened.reader.read({ db in try DetectionWorker.hasWork(db) })) == true {
+                        _ = await detection.drain()
+                    }
+                }
                 network = NetworkReadiness()
                 Self.log.info("database ready")
                 try await restoreRejectionState()
@@ -366,12 +379,16 @@ final class AppModel {
 
     private func observeHistoryProgress() {
         guard historyObservation == nil, let database else { return }
-        historyObservation = ValueObservation.tracking { db in
-            try BackfillProgress.load(db).coveredBackTo
-        }.removeDuplicates().start(in: database.reader, scheduling: .async(onQueue: .main), onError: { _ in }, onChange: { [weak self] day in
+        historyObservation = ValueObservation.tracking { db -> [String?] in
+            [try BackfillProgress.load(db).coveredBackTo,
+             try String.fetchOne(db, sql: "SELECT value FROM sync_state WHERE key = ?", arguments: [AppDatabase.billsRewalkKey])]
+        }.removeDuplicates().start(in: database.reader, scheduling: .async(onQueue: .main), onError: { _ in }, onChange: { [weak self] values in
             Task { @MainActor in
-                guard let self, self.isSyncing, let day, let date = CalendarDay(isoString: day) else { return }
-                self.syncMessage = "Getting your past spending — I've gone back as far as \(date.shortPhrase()) so far. You don't need to wait for this."
+                guard let self, self.isSyncing, let day = values[0], let date = CalendarDay(isoString: day) else { return }
+                // The walk the milestone 5 upgrade restarts is not a first connection, and says so.
+                self.syncMessage = values[1] != nil
+                    ? "Rechecking your past spending so I can find bills — as far back as \(date.shortPhrase()) so far. You don't need to wait for this."
+                    : "Getting your past spending — I've gone back as far as \(date.shortPhrase()) so far. You don't need to wait for this."
             }
         })
     }

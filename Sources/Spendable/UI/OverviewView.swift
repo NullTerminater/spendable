@@ -12,6 +12,13 @@ struct OverviewView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
+                if store.newBillsFound > 0 {
+                    // Automatically confirmed bills already count; this says so until Bills is seen.
+                    Text(store.newBillsFound == 1
+                         ? "1 new bill found in your bank's history. I've started counting it. Check it under Bills & subscriptions."
+                         : "\(store.newBillsFound) new bills found in your bank's history. I've started counting them. Check them under Bills & subscriptions.")
+                        .font(.callout)
+                }
                 switch store.result {
                 case .noAccountsYet:
                     dontKnowYet

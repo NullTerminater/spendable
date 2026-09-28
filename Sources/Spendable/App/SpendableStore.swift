@@ -19,6 +19,14 @@ final class SpendableStore {
     private(set) var syncNotices: [SyncNotice] = []
     private(set) var balancesSyncedAt: Date?
     private(set) var accountChangeMessage: String?
+    /// What the bank has shown about bills being paid (milestone-5-review decision 26).
+    private(set) var payments: BankPayments = .none
+    /// Set when an owner edit found the bill had changed since the form opened.
+    private(set) var billChangedMessage: String?
+    /// The last Confirm, Dismiss, Mark cancelled or Same bill, which Undo reverses.
+    private(set) var lastBillAction: BillUndo?
+    /// Called after an owner action that gives detection work to do. AppModel owns the worker.
+    var detectionRequested: (@MainActor () -> Void)?
     private var returnMessages: [(id: Int64, day: CalendarDay, text: String)] = []
 
     /// Which figure the owner is looking at. Settings makes this stick in milestone 9.
@@ -53,6 +61,7 @@ final class SpendableStore {
         var paySchedule: PaySchedule?
         var notices: [SyncNotice] = []
         var balancesSyncedAt: Date?
+        var payments: BankPayments = .none
 
         init(_ db: Database) throws {
             // Archived accounts are fetched too: a bill still pointing at one has to be accounted
@@ -60,6 +69,9 @@ final class SpendableStore {
             accounts = try Account.fetchAll(db)
             charges = try RecurringCharge.fetchAll(db)
             paySchedule = try PaySchedule.fetch(db)
+            let oldestBalance = accounts.filter { $0.source == .simplefin && $0.archivedAt == nil }
+                .map { min($0.balanceDate, $0.lastSeenInSyncAt ?? $0.balanceDate) }.min()
+            payments = try BankPaymentQueries.load(db, oldestBalanceInstant: oldestBalance)
             balancesSyncedAt = try SyncState.date(db, SyncState.balancesSyncedAt)
             if let json = try String.fetchOne(db, sql: "SELECT value FROM sync_state WHERE key = 'connection-notices'"),
                let data = json.data(using: .utf8) {
@@ -94,6 +106,7 @@ final class SpendableStore {
         paySchedule = snapshot.paySchedule
         syncNotices = snapshot.notices
         balancesSyncedAt = snapshot.balancesSyncedAt
+        payments = snapshot.payments
         recompute(calendar: calendar)
         if result != previous { accountChangeMessage = nil }
         for account in accounts {
@@ -117,7 +130,18 @@ final class SpendableStore {
     private func recompute(calendar: Calendar = .current) {
         result = SafeToSpendEngine.compute(
             accounts: accounts, charges: charges, paySchedule: paySchedule,
-            today: today, calendar: calendar)
+            today: today, calendar: calendar, payments: payments)
+    }
+
+    /// The bills with their paid-through markers moved by the payments the bank has shown, as the
+    /// engine sees them. What the Bills screen and Mark paid show as "next due".
+    var effectiveCharges: [RecurringCharge] {
+        SafeToSpendEngine.applying(payments, to: charges, accounts: classifiedAccounts, calendar: calendar)
+    }
+
+    /// Bills confirmed automatically that the owner has not yet seen on the Bills screen.
+    var newBillsFound: Int {
+        charges.filter { $0.status == .confirmed && $0.confirmedBy == .auto && $0.announcedAt == nil }.count
     }
 
     /// A day changing writes nothing to the database, so no observation fires. These do.
@@ -156,45 +180,274 @@ final class SpendableStore {
         }
     }
 
-    func save(_ charge: RecurringCharge) async {
-        await write { db in
-            var row = charge
-            if row.id == nil {
-                try row.insert(db)
-            } else {
-                try row.update(db)
+    /// Adds a bill, or saves the owner's edit to one.
+    ///
+    /// An edit writes only the columns the owner owns, and only if nothing else has written the row
+    /// since the form opened (milestone-5-review decision 21): a detection or payment write in the
+    /// meantime means the form reloads instead of putting old values back. On a detected bill each
+    /// field the owner changes becomes an override detection will not undo.
+    @discardableResult
+    func save(_ charge: RecurringCharge) async -> BillWriteResult {
+        let statementKey = charge.statementMerchant.flatMap { MerchantKey.normalize(payee: nil, description: $0).key }
+        let now = Int64(Date.now.timeIntervalSince1970)
+        do {
+            let outcome = try await database.writer.write { db -> BillWriteResult in
+                var row = charge
+                row.statementMerchantKey = statementKey
+                guard let id = row.id else {
+                    if let payingId = row.payingAccountId, let account = try Account.fetchOne(db, key: payingId) {
+                        row.currency = account.currency
+                    }
+                    try row.insert(db)
+                    return .saved
+                }
+                guard let current = try RecurringCharge.fetchOne(db, key: id) else { return .gone }
+                guard current.revision == charge.revision else { return .changedSinceOpened }
+                var overrides = current.ownerOverrides
+                if current.source == .detected {
+                    if row.amountCents != current.amountCents { overrides |= OwnerOverride.amount }
+                    if row.cadence != current.cadence { overrides |= OwnerOverride.cadence }
+                    if row.payingAccountId != current.payingAccountId { overrides |= OwnerOverride.account }
+                    if row.anchorDate != current.anchorDate { overrides |= OwnerOverride.anchor }
+                }
+                try db.execute(sql: """
+                    UPDATE recurring_charge
+                       SET name = ?, kind = ?, amount_cents = ?, cadence = ?, anchor_date = ?,
+                           next_expected_date = ?, paying_account_id = ?, destination_account_id = ?,
+                           statement_merchant = ?, statement_merchant_key = ?, owner_overrides = ?,
+                           revision = revision + 1, updated_at = ?
+                     WHERE id = ? AND revision = ?
+                    """, arguments: [
+                        row.name, row.kind.rawValue, row.amountCents, row.cadence.rawValue, row.anchorDate,
+                        row.nextExpectedDate, row.payingAccountId, row.destinationAccountId,
+                        row.statementMerchant, statementKey, overrides, now, id, charge.revision,
+                    ])
+                return db.changesCount == 1 ? .saved : .changedSinceOpened
             }
+            report(outcome)
+            if outcome == .saved { detectionRequested?() }
+            return outcome
+        } catch {
+            saveFailed()
+            return .failed
         }
     }
 
+    /// Only a bill the owner typed in, with no bank charges linked to it, can be deleted. A detected
+    /// bill is dismissed or marked cancelled instead, so its record stops it coming back
+    /// (milestone-5-review decision 22).
     func delete(_ charge: RecurringCharge) async {
-        guard let id = charge.id else { return }
-        await write { db in
-            _ = try RecurringCharge.deleteOne(db, key: id)
-        }
+        guard let id = charge.id, charge.source == .manual else { return }
+        do {
+            let deleted = try await database.writer.write { db -> Bool in
+                let linked = try Bool.fetchOne(db, sql: "SELECT EXISTS (SELECT 1 FROM recurring_occurrence WHERE recurring_charge_id = ?)",
+                                               arguments: [id]) ?? false
+                guard !linked else { return false }
+                return try RecurringCharge.deleteOne(db, key: id)
+            }
+            if !deleted {
+                failure = "Bank charges are matched to this bill, so I can't delete it. Mark it cancelled instead."
+            }
+        } catch { saveFailed() }
     }
 
     /// Records that a bill has been paid, and optionally takes it off the balance it came from in
     /// the same step, so the number cannot rise before the money does.
+    ///
+    /// Moves the marker from where the owner saw it (the effective one, after bank payments) and
+    /// only if the bill has not been written since; the balance is reduced only if the mark landed.
+    @discardableResult
     func markPaid(
         _ charge: RecurringCharge,
         alsoReduceBalance: Bool,
         calendar: Calendar = .current,
         now: Date = .now
-    ) async {
+    ) async -> BillWriteResult {
         let updated = charge.markingPaidOnce(
             balanceAlreadyUpdated: alsoReduceBalance, in: calendar, now: now)
         let payingId = charge.payingAccountId
         let amount = charge.amountCents
-        await write { db in
-            try updated.update(db)
-            if alsoReduceBalance, let payingId, var account = try Account.fetchOne(db, key: payingId),
-               account.source == .manual {
-                account.balanceCents -= amount
-                account.balanceDate = Int64(now.timeIntervalSince1970)
-                account.manualUpdatedAt = account.balanceDate
-                try account.update(db)
+        guard let id = charge.id else { return .gone }
+        do {
+            let outcome = try await database.writer.write { db -> BillWriteResult in
+                try db.execute(sql: """
+                    UPDATE recurring_charge
+                       SET next_expected_date = ?, last_marked_paid_at = ?, paid_reflected_in_balance = ?,
+                           revision = revision + 1, updated_at = ?
+                     WHERE id = ? AND revision = ?
+                    """, arguments: [updated.nextExpectedDate, updated.lastMarkedPaidAt, updated.paidReflectedInBalance,
+                                     updated.updatedAt, id, charge.revision])
+                guard db.changesCount == 1 else { return .changedSinceOpened }
+                if alsoReduceBalance, let payingId, var account = try Account.fetchOne(db, key: payingId),
+                   account.source == .manual {
+                    account.balanceCents -= amount
+                    account.balanceDate = Int64(now.timeIntervalSince1970)
+                    account.manualUpdatedAt = account.balanceDate
+                    try account.update(db)
+                }
+                return .saved
             }
+            report(outcome)
+            return outcome
+        } catch {
+            saveFailed()
+            return .failed
+        }
+    }
+
+    // MARK: Detected bills (milestone-5-review decisions 2, 11, 13, 20, 25)
+
+    @discardableResult
+    func apply(_ action: BillAction, to bill: RecurringCharge, now: Date = .now) async -> BillWriteResult {
+        guard let id = bill.id else { return .gone }
+        let seconds = Int64(now.timeIntervalSince1970)
+        let today = CalendarDay.today(in: CalendarDay.utc, now: now).isoString
+        do {
+            let (outcome, undo) = try await database.writer.write { db -> (BillWriteResult, BillUndo?) in
+                guard let current = try RecurringCharge.fetchOne(db, key: id) else { return (.gone, nil) }
+                guard current.revision == bill.revision else { return (.changedSinceOpened, nil) }
+                var suppressionId: Int64?
+                switch action {
+                case .confirm:
+                    guard current.status == .suggested else { return (.changedSinceOpened, nil) }
+                    try db.execute(sql: """
+                        UPDATE recurring_charge SET status = 'confirmed', confirmed_by = 'user', announced_at = ?,
+                               next_expected_date = COALESCE(next_expected_date, anchor_date),
+                               revision = revision + 1, updated_at = ? WHERE id = ?
+                        """, arguments: [seconds, seconds, id])
+                case .dismiss, .markCancelled:
+                    let kind = action == .dismiss ? "dismissed" : "cancelled"
+                    try db.execute(sql: """
+                        UPDATE recurring_charge SET status = ?, cancelled_on = ?, announced_at = COALESCE(announced_at, ?),
+                               revision = revision + 1, updated_at = ? WHERE id = ?
+                        """, arguments: [kind, action == .markCancelled ? today : nil, seconds, seconds, id])
+                    if current.source == .detected, let account = current.detectionAccountId, let key = current.merchantNormalized {
+                        let price = current.detectedAmountCents ?? current.amountCents
+                        try db.execute(sql: """
+                            INSERT INTO detection_suppression
+                                (account_id, merchant_key, cadence, band_low_cents, band_high_cents, charge_id, kind, created_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            """, arguments: [account, key, (current.detectedCadence ?? current.cadence).rawValue,
+                                             min(price, current.amountChangedFromCents ?? price),
+                                             max(price, current.amountChangedFromCents ?? price), id, kind, seconds])
+                        suppressionId = db.lastInsertedRowID
+                    }
+                case .stillActive:
+                    try db.execute(sql: """
+                        UPDATE recurring_charge SET still_active_through = ?, inferred_inactive_since = NULL,
+                               revision = revision + 1, updated_at = ? WHERE id = ?
+                        """, arguments: [today, seconds, id])
+                }
+                return (.saved, BillUndo(chargeId: id, previousStatus: current.status,
+                                         previousConfirmedBy: current.confirmedBy, suppressionId: suppressionId,
+                                         action: action))
+            }
+            report(outcome)
+            if let undo { lastBillAction = undo }
+            return outcome
+        } catch {
+            saveFailed()
+            return .failed
+        }
+    }
+
+    /// Reverses the last Confirm, Dismiss or Mark cancelled at once, including its suppression, and
+    /// asks detection to look at that merchant again.
+    func undoLastBillAction(now: Date = .now) async {
+        guard let undo = lastBillAction else { return }
+        let seconds = Int64(now.timeIntervalSince1970)
+        await write { db in
+            try db.execute(sql: """
+                UPDATE recurring_charge SET status = ?, confirmed_by = ?, cancelled_on = NULL,
+                       revision = revision + 1, updated_at = ? WHERE id = ?
+                """, arguments: [undo.previousStatus.rawValue, undo.previousConfirmedBy?.rawValue, seconds, undo.chargeId])
+            if let suppression = undo.suppressionId {
+                try db.execute(sql: "UPDATE detection_suppression SET undone_at = ? WHERE id = ?", arguments: [seconds, suppression])
+            }
+            try db.execute(sql: """
+                INSERT INTO detection_dirty (account_id, merchant_key, enqueued_at)
+                SELECT detection_account_id, merchant_normalized, ? FROM recurring_charge
+                 WHERE id = ? AND detection_account_id IS NOT NULL AND merchant_normalized IS NOT NULL
+                ON CONFLICT (account_id, merchant_key) DO UPDATE SET attempts = 0, failed_at = NULL
+                """, arguments: [seconds, undo.chargeId])
+        }
+        lastBillAction = nil
+        detectionRequested?()
+    }
+
+    /// The owner says a detected bill and a bill they typed in are the same one. The typed one is
+    /// kept, with its name, amount and paid-through date; the detected one's bank charges move to it
+    /// and the detected one is dismissed, in one transaction (decision 20).
+    func sameBill(detected: RecurringCharge, manual: RecurringCharge, now: Date = .now) async {
+        guard let detectedId = detected.id, let manualId = manual.id, detected.source == .detected,
+              manual.source == .manual else { return }
+        let seconds = Int64(now.timeIntervalSince1970)
+        await write { db in
+            try db.execute(sql: "UPDATE recurring_occurrence SET recurring_charge_id = ? WHERE recurring_charge_id = ?",
+                           arguments: [manualId, detectedId])
+            try db.execute(sql: """
+                UPDATE recurring_charge
+                   SET statement_merchant = COALESCE(statement_merchant, ?),
+                       statement_merchant_key = COALESCE(statement_merchant_key, ?),
+                       revision = revision + 1, updated_at = ? WHERE id = ?
+                """, arguments: [detected.name, detected.merchantNormalized, seconds, manualId])
+            try db.execute(sql: """
+                UPDATE recurring_charge SET status = 'dismissed', announced_at = COALESCE(announced_at, ?),
+                       revision = revision + 1, updated_at = ? WHERE id = ?
+                """, arguments: [seconds, seconds, detectedId])
+            if let account = detected.detectionAccountId, let key = detected.merchantNormalized {
+                let price = detected.detectedAmountCents ?? detected.amountCents
+                try db.execute(sql: """
+                    INSERT INTO detection_suppression
+                        (account_id, merchant_key, cadence, band_low_cents, band_high_cents, charge_id, kind, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, 'dismissed', ?)
+                    """, arguments: [account, key, detected.cadence.rawValue, price, price, detectedId, seconds])
+            }
+        }
+        detectionRequested?()
+    }
+
+    /// "That wasn't this bill": the latest bank charge matched to it stops counting as its payment,
+    /// and is never matched to it again (decision 13).
+    func rejectLatestPayment(_ bill: RecurringCharge, now: Date = .now) async {
+        guard let id = bill.id else { return }
+        let seconds = Int64(now.timeIntervalSince1970)
+        await write { db in
+            guard let transactionId = try Int64.fetchOne(db, sql: """
+                SELECT transaction_id FROM recurring_occurrence
+                 WHERE recurring_charge_id = ? AND role IN ('payment', 'pending_payment')
+                 ORDER BY occurrence_day DESC LIMIT 1
+                """, arguments: [id]) else { return }
+            try db.execute(sql: "DELETE FROM recurring_occurrence WHERE transaction_id = ?", arguments: [transactionId])
+            try db.execute(sql: """
+                INSERT OR IGNORE INTO recurring_link_rejection (transaction_id, recurring_charge_id, created_at) VALUES (?, ?, ?)
+                """, arguments: [transactionId, id, seconds])
+            try db.execute(sql: "UPDATE recurring_charge SET revision = revision + 1 WHERE id = ?", arguments: [id])
+        }
+    }
+
+    /// The Bills screen has been seen: automatically found bills are no longer new.
+    func markNewBillsSeen(now: Date = .now) async {
+        guard newBillsFound > 0 else { return }
+        let seconds = Int64(now.timeIntervalSince1970)
+        await write { db in
+            try db.execute(sql: """
+                UPDATE recurring_charge SET announced_at = ?
+                 WHERE announced_at IS NULL AND status = 'confirmed' AND confirmed_by = 'auto'
+                """, arguments: [seconds])
+        }
+    }
+
+    func clearBillChangedMessage() { billChangedMessage = nil }
+
+    private func report(_ outcome: BillWriteResult) {
+        switch outcome {
+        case .changedSinceOpened:
+            billChangedMessage = "This bill changed while you were looking at it. Check the details and try again."
+        case .gone:
+            billChangedMessage = "This bill isn't there any more."
+        case .saved, .failed:
+            billChangedMessage = nil
         }
     }
 
@@ -288,7 +541,7 @@ final class SpendableStore {
         if let index = after.firstIndex(where: { $0.id == account.id }) {
             after[index].archivedAt = Int64(Date.now.timeIntervalSince1970)
         }
-        let preview = SafeToSpendEngine.compute(accounts: after, charges: charges, paySchedule: paySchedule, today: today, calendar: calendar)
+        let preview = SafeToSpendEngine.compute(accounts: after, charges: charges, paySchedule: paySchedule, today: today, calendar: calendar, payments: payments)
         let figure: SpendableFigure?
         if case .figures(let report) = preview { figure = report.figure(shownFigure) ?? report.month } else { figure = nil }
         let bills = figure?.subtractedObligations.filter { $0.payingAccountId == account.id } ?? []
@@ -356,6 +609,72 @@ final class SpendableStore {
             failure = "Spendable couldn't save that. Try again."
             Self.log.error("write failed: \(String(describing: type(of: error)), privacy: .public)")
         }
+    }
+}
+
+/// What the owner can do to a detected or suggested bill (milestone-5-review decisions 2 and 11).
+enum BillAction: Equatable, Sendable {
+    /// A suggestion is a bill: start counting it.
+    case confirm
+    /// Not a bill. Never shown again, and neither is anything like it on the same account.
+    case dismiss
+    /// It stopped. Stops counting now, and a charge after today says so.
+    case markCancelled
+    /// Flagged as maybe cancelled, but it is still being paid. Clears the flag.
+    case stillActive
+}
+
+/// What happened to an owner's write to a bill.
+enum BillWriteResult: Equatable, Sendable {
+    case saved
+    /// Something else wrote the bill after the owner opened it; nothing was written.
+    case changedSinceOpened
+    case gone
+    case failed
+}
+
+/// Enough to put a bill back the way it was before the owner's last action.
+struct BillUndo: Equatable, Sendable {
+    let chargeId: Int64
+    let previousStatus: RecurringChargeStatus
+    let previousConfirmedBy: ConfirmedBy?
+    let suppressionId: Int64?
+    let action: BillAction
+}
+
+/// The two bounded reads behind `BankPayments` (milestone-5-review decision 26). Neither reads
+/// transaction history: one aggregates the payment links, the other reads links whose charge
+/// posted in the last few days or is still a hold.
+enum BankPaymentQueries {
+    static func load(_ db: Database, oldestBalanceInstant: Int64?) throws -> BankPayments {
+        var payments = BankPayments()
+        for row in try Row.fetchAll(db, sql: """
+            SELECT o.recurring_charge_id, MAX(o.occurrence_day) AS paid
+              FROM recurring_occurrence o JOIN bank_transaction t ON t.id = o.transaction_id
+             WHERE o.role = 'payment' AND t.pending = 0 AND t.voided_at IS NULL AND t.superseded_by IS NULL
+               AND ABS(t.amount_cents) = o.linked_amount_cents
+             GROUP BY o.recurring_charge_id
+            """) {
+            let id: Int64 = row["recurring_charge_id"]
+            if let text: String = row["paid"], let day = CalendarDay(isoString: text) { payments.latestPaid[id] = day }
+        }
+        let since = (oldestBalanceInstant ?? Int64.max) - 2 * 86_400
+        for row in try Row.fetchAll(db, sql: """
+            SELECT o.recurring_charge_id, o.occurrence_day, o.linked_amount_cents, t.pending, t.posted, t.first_seen_at
+              FROM recurring_occurrence o JOIN bank_transaction t ON t.id = o.transaction_id
+             WHERE t.voided_at IS NULL AND t.superseded_by IS NULL AND ABS(t.amount_cents) = o.linked_amount_cents
+               AND ((o.role = 'pending_payment' AND t.pending = 1)
+                 OR (o.role = 'payment' AND t.pending = 0 AND t.effective_date >= ?))
+            """, arguments: [since]) {
+            guard let text: String = row["occurrence_day"], let day = CalendarDay(isoString: text) else { continue }
+            let pending = (row["pending"] as Int? ?? 0) != 0
+            let posted: Int64? = row["posted"]
+            payments.recent.append(BankPayment(
+                chargeId: row["recurring_charge_id"], occurrence: day, amountCents: row["linked_amount_cents"],
+                pending: pending, postedInstant: pending ? nil : ((posted ?? 0) > 0 ? posted : nil),
+                firstSeenAt: row["first_seen_at"]))
+        }
+        return payments
     }
 }
 
