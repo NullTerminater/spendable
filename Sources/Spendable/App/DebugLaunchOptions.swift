@@ -11,6 +11,8 @@ import os
 /// - `SPENDABLE_DEBUG_SEED_SAMPLE=1`: if there are no accounts, add three made-up manual ones.
 /// - `SPENDABLE_DEBUG_MEMORY_CYCLE=N`: log the footprint at idle, then N times open the main
 ///   window, log, close it, log. The app stays running afterwards.
+/// - `SPENDABLE_DEBUG_DETECTION=seed|bench`: milestone 5's synthetic acceptance data or its
+///   measurements. Scratch containers only; see `DebugDetection`.
 enum DebugLaunchOptions {
     private static let log = Logger(subsystem: StorePaths.bundleIdentifier, category: "debug")
 
@@ -37,6 +39,9 @@ enum DebugLaunchOptions {
         }
         if environment["SPENDABLE_DEBUG_CONNECT_DEMO"] != nil {
             Task { await connectToTheDemo(model) }
+        }
+        if let mode = environment["SPENDABLE_DEBUG_DETECTION"] {
+            DebugDetection.apply(model: model, mode: mode)
         }
     }
 
