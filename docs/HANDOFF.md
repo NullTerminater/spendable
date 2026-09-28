@@ -1,6 +1,12 @@
 # Where this project is
 
-Updated 21 September 2026 after implementing and validating milestone 4. Read `docs/PLAN.md` for the
+Updated 28 September 2026 for transfer to another AI. **Read
+`docs/MILESTONE-5-HANDOFF.md` for the exact continuation state, checkouts and unresolved design
+review.** Milestone 4 is implemented and validated; the owner ran it and confirmed persistence
+after quitting/reopening, then explicitly authorized milestone 5. M5 has only an unreviewed
+`docs/DETECTION.md` draft: no implementation, migration, tests or measurements.
+
+Read `docs/PLAN.md` for the
 owner's decisions, `docs/CONNECTING.md` for the implemented connection contract, and
 `docs/reviews/milestone-4-review.md` for its original review. The owner's new rule 13
 explicitly permits safe repair of rejected credentials in this milestone.
@@ -12,10 +18,12 @@ explicitly permits safe repair of rejected credentials in this milestone.
 | 1. Skeleton, signing, schema, manual accounts, window | Done, owner reviewed | `v0.1-skeleton` |
 | 2. Engine, disclosure, pay schedule, manual bills | Done, owner reviewed | `v0.2-engine` |
 | 3. SimpleFIN client, Keychain, budgeted sync | Done, owner reviewed | `v0.3-simplefin` |
-| 4. Setup, account corrections, connection repair, scheduler | Implemented; validation below; owner acceptance pending | `v0.4-connected` |
-| 5–9. Detection, cards, menu number, widget, settings | Not started | — |
+| 4. Setup, account corrections, connection repair, scheduler | Built and validated; owner ran app and confirmed persistence | `v0.4-connected` |
+| 5. Recurring-charge detection | Authorized; draft contract only, independent review unfinished | — |
+| 6–9. Cards, menu number, widget, settings | Not started | — |
 
-Do not start milestone 5 until the owner has run and reviewed milestone 4.
+Milestone 5 is authorized. Complete its contract review before implementation; do not start
+milestone 6 until the owner has seen milestone 5 run.
 
 ## What milestone 4 now contains
 
@@ -81,15 +89,17 @@ Use a different empty scratch folder for each replay. `SPENDABLE_DEBUG_FIXTURE` 
 credential store. Other fixture names are documented in `docs/CONNECTING.md`. These are Debug
 environment switches; there is no Debug > Replay fixture menu and no lowered-budget UI.
 
-## Owner acceptance still needed
+## Owner review and remaining measurement
 
-Open the normal app, choose **Connect your bank**, and paste a real setup token directly there,
-never into chat. Review account guesses, correct one, then relaunch and check it persisted. The
-builder's synthetic checks do not substitute for bank-specific behavior or the first Keychain
-consent dialog. Real-first-sync footprint remains unmeasured until that owner-run flow; report
-only the footprint number, never account contents. Replacing a working connection stays in
-milestone 9. Its disconnect implementation must clear `credential-generation-applied` alongside
-connection metadata, so an intentional deletion cannot look like missing tracked credentials.
+The owner reported: “so far so good. I quit and opened again, info survives,” then authorized
+milestone 5. No further permission to start M5 is needed. This does not establish that a particular
+account-type correction was tested, and real-first-sync footprint remains unmeasured. Never infer
+those results or inspect real account contents to fill the gap. Any later owner-reported memory
+measurement should contain only the footprint number.
+
+Replacing a working connection stays in milestone 9. Its disconnect implementation must clear
+`credential-generation-applied` alongside connection metadata, so an intentional deletion cannot
+look like missing tracked credentials.
 
 ## Earlier measurements
 
