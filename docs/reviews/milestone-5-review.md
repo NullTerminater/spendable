@@ -834,3 +834,38 @@ The trade-off in one example:
 
 Everything is built the review's way unless you say otherwise. Switching back is one predicate in
 the total and one in the engine.
+
+## Implementation addendum (28 September 2026)
+
+This addendum was written after the decisions above were implemented in the same session. None of
+the code has been compiled or tested. That happens on the owner's Mac.
+
+**A finding made during implementation, adopted as part of decision 13.** A bank payment moves a
+bill's effective marker only when the paying account is counted.
+
+The problem is a subscription charged to a card with no statement entered. ENGINE subtracts it
+directly, because nothing else counts that card's spending. The charge appearing on the card does
+not mean money has left anything the figure adds up. The card debt is still unpaid and still not
+subtracted. So letting that charge advance the marker would raise the figure, which breaks
+decision 1. The same applies to any account that is not counted.
+
+`SafeToSpendEngine.applying` enforces this, and `cardChargeDoesNotRaiseTheFigure` tests it.
+
+**Known gaps against the decisions.** Each one errs in the safe direction and is left for later:
+
+- **Decision 14 (anchors).** Automatic earlier re-anchoring and the "change its due day?"
+  suggestion are not implemented. Anchors stay where detection first set them. A charge that drifts
+  outside tolerance is evidence only, so its occurrence stays owed.
+- **Decision 9 (dense keys).** A dense key does not settle occurrences, not even on a unique match.
+  Its occurrences stay owed.
+- **Decision 11 (renormalization).** Suppressions are not yet carried to new keys when the rules
+  change. Normalizer version 1 is the first, so nothing needs carrying yet. The next version bump
+  must add this before it ships.
+- **Decision 11 ("Charged again").** The "Charged again after you marked it cancelled" sentence is
+  not shown on a cancelled row before it counts again. The row returns, badged, after three charges
+  made after the cancellation.
+- **Decision 10 (suggestion-only rows).** A row created suggestion-only because of an ambiguous
+  lineage can later auto-confirm through its own links.
+- **Decision 25 (paging).** The Bills screen pages by a growing SQL `LIMIT` over the section-ranked
+  order, not by keyset. `recurring_charge` is small, and `SpendableStore` already reads all of it
+  for the engine. The transaction table is never read.
