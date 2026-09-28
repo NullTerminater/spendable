@@ -409,9 +409,13 @@ enum SimpleFINIngest {
             SELECT MIN(start_at) AS s, MAX(end_at) AS e, MIN(first_fetched_at) AS f FROM tx_coverage
              WHERE account_id = ? AND start_at <= ? AND end_at >= ?
             """, arguments: [accountId, end, start])
-        let mergedStart: Int64 = min(start, merged?["s"] ?? start)
-        let mergedEnd: Int64 = max(end, merged?["e"] ?? end)
-        let first: Int64 = merged?["f"] ?? nowSeconds
+        // An aggregate over no rows is one row of NULLs, so every value is read as optional.
+        let foundStart: Int64? = merged.flatMap { $0["s"] as Int64? }
+        let foundEnd: Int64? = merged.flatMap { $0["e"] as Int64? }
+        let foundFirst: Int64? = merged.flatMap { $0["f"] as Int64? }
+        let mergedStart = min(start, foundStart ?? start)
+        let mergedEnd = max(end, foundEnd ?? end)
+        let first = foundFirst ?? nowSeconds
         try db.execute(sql: "DELETE FROM tx_coverage WHERE account_id = ? AND start_at <= ? AND end_at >= ?",
                        arguments: [accountId, end, start])
         try db.execute(sql: "INSERT INTO tx_coverage (account_id, start_at, end_at, first_fetched_at, last_fetched_at) VALUES (?, ?, ?, ?, ?)",

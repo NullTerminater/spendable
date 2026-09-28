@@ -262,8 +262,69 @@ struct DetectionPassTests {
             try Self.monthly(db, account: account, prefix: "V", from: Self.day(2026, 7, 9), count: 3, cents: -8000, description: "CITY POWER ELECTRIC")
         }
         Self.drain(database)
-        let old = try Self.bills(database).first { $0.merchantNormalized == "CITYPOWER UTIL" }
-        #expect(old?.inferredInactiveSince == nil)
+        let old = try #require(try Self.bills(database).first { $0.merchantNormalized == "CITYPOWER UTIL" })
+        #expect(old.status == .confirmed)
+        #expect(old.inferredInactiveSince == nil)
+    }
+
+    @Test("two plans that first looked like one biweekly bill split into two bills")
+    func biweeklyThenSplit() throws {
+        let database = try AppDatabase.inMemory()
+        try database.writer.write { db in
+            let account = try Self.seedAccount(db)
+            try Self.charge(db, account: account, "P1", Self.day(2026, 1, 3), cents: -99, description: "APPLE.COM/BILL")
+            try Self.charge(db, account: account, "P2", Self.day(2026, 1, 19), cents: -99, description: "APPLE.COM/BILL")
+            try Self.charge(db, account: account, "P3", Self.day(2026, 2, 3), cents: -99, description: "APPLE.COM/BILL")
+        }
+        Self.drain(database)
+        try database.writer.write { db in
+            try Self.charge(db, account: 1, "P4", Self.day(2026, 2, 19), cents: -99, description: "APPLE.COM/BILL")
+            try Self.charge(db, account: 1, "P5", Self.day(2026, 3, 3), cents: -99, description: "APPLE.COM/BILL")
+            try Self.charge(db, account: 1, "P6", Self.day(2026, 3, 19), cents: -99, description: "APPLE.COM/BILL")
+        }
+        Self.drain(database)
+        let live = try Self.bills(database).filter { $0.status == .confirmed || $0.status == .suggested }
+        #expect(live.count == 2)
+        #expect(live.allSatisfy { $0.cadence == .monthly })
+    }
+
+    @Test("marking paid a bill the bank already shows paid does not skip the next one")
+    func markPaidAfterBankPayment() async throws {
+        let database = try AppDatabase.inMemory()
+        try database.writer.write { db in
+            let account = try Self.seedAccount(db)
+            try Self.monthly(db, account: account, prefix: "R", from: Self.day(2026, 6, 1), count: 3, cents: -140000, description: "PROPERTY SYNTH MGMT")
+        }
+        Self.drain(database)
+        let store = await SpendableStore(database: database)
+        let stored = try #require(try Self.bills(database).first)
+        #expect(await store.markPaid(stored, alsoReduceBalance: true, calendar: Self.chicago) == .saved)
+        let after = try #require(try Self.bills(database).first)
+        // The stored marker moves one step from where it was; the bank's payments already put the
+        // effective one past August, so the owner's mark changes nothing about what is owed.
+        let payments = try database.reader.read { db in try BankPaymentQueries.load(db, oldestBalanceInstant: nil) }
+        let paid = try #require(payments.latestPaid[after.id ?? 0])
+        #expect(after.occurrence(after: paid, in: Self.chicago) == Self.day(2026, 9, 1))
+        #expect((after.nextExpectedDay(in: Self.chicago) ?? Self.day(2099, 1, 1)) <= Self.day(2026, 9, 1))
+    }
+
+    @Test("rejecting the last payment steps the marker back and the pair is never linked again")
+    func rejectLatestPayment() async throws {
+        let database = try AppDatabase.inMemory()
+        try database.writer.write { db in
+            let account = try Self.seedAccount(db)
+            try Self.monthly(db, account: account, prefix: "S", from: Self.day(2026, 6, 12), count: 3, cents: -999)
+        }
+        Self.drain(database)
+        let store = await SpendableStore(database: database)
+        let bill = try #require(try Self.bills(database).first)
+        await store.rejectLatestPayment(bill)
+        try database.writer.write { db in
+            try db.execute(sql: "INSERT INTO detection_dirty (account_id, merchant_key, enqueued_at) VALUES (1, 'SPOTIFY', 0)")
+        }
+        Self.drain(database)
+        let payments = try database.reader.read { db in try BankPaymentQueries.load(db, oldestBalanceInstant: nil) }
+        #expect(payments.latestPaid[bill.id ?? 0] == Self.day(2026, 7, 12))
     }
 
     @Test("the monthly total is a sum of rounded rows and ignores suggestions and moves between accounts")

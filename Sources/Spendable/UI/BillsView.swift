@@ -91,7 +91,10 @@ struct BillsView: View {
     }
 
     private func list(_ pager: BillsPager) -> some View {
-        ScrollView {
+        // Once per render, not once per row: the engine's view of every bill after bank payments.
+        let effective = Dictionary(store.effectiveCharges.compactMap { charge in charge.id.map { ($0, charge) } },
+                                   uniquingKeysWith: { first, _ in first })
+        return ScrollView {
             LazyVStack(alignment: .leading, spacing: 8) {
                 header(pager)
                 ForEach(pager.page.rows.indices, id: \.self) { index in
@@ -102,12 +105,16 @@ struct BillsView: View {
                             .foregroundStyle(.secondary)
                             .padding(.top, 10)
                     }
-                    let bill = effective(entry.charge)
-                    BillRow(bill: bill, section: entry.section, accountName: name(of: bill.payingAccountId),
-                            movesTo: name(of: bill.transferEvidenceAccountId))
+                    // Shown as the engine sees it; every edit and action gets the stored row, so an
+                    // owner's save can never turn a bank payment into their own paid-through date
+                    // (milestone-5 code review, M1 and M2).
+                    let stored = store.charges.first { $0.id == entry.charge.id } ?? entry.charge
+                    let shown = entry.charge.id.flatMap { effective[$0] } ?? stored
+                    BillRow(bill: shown, section: entry.section, accountName: name(of: shown.payingAccountId),
+                            movesTo: name(of: shown.transferEvidenceAccountId))
                         .contentShape(Rectangle())
-                        .contextMenu { menu(for: bill) }
-                        .onTapGesture(count: 2) { editing = bill }
+                        .contextMenu { menu(for: stored, shown: shown) }
+                        .onTapGesture(count: 2) { editing = stored }
                         .onAppear {
                             if index == pager.page.rows.count - 1 { Task { await pager.loadMore() } }
                         }
@@ -142,13 +149,13 @@ struct BillsView: View {
             Text("Bill detection hasn't seen new transactions since \(since.shortPhrase()). Your balances are still up to date.").font(.callout)
         }
         if !pager.notices.denseMerchants.isEmpty {
-            Text("I don't look for bills among places you pay very often, like \(SafeToSpendNarrative.sentenceList(pager.notices.denseMerchants.map(DetectionPass.displayName(for:))))). If one of them is a bill, add it yourself.")
+            Text("I don't look for bills among places you pay very often, like \(SafeToSpendNarrative.sentenceList(pager.notices.denseMerchants.map(DetectionPass.displayName(for:)))). If one of them is a bill, add it yourself.")
                 .font(.callout)
         }
     }
 
     @ViewBuilder
-    private func menu(for bill: RecurringCharge) -> some View {
+    private func menu(for bill: RecurringCharge, shown: RecurringCharge) -> some View {
         switch bill.status {
         case .suggested:
             Button("It's a bill — count it") { Task { await store.apply(.confirm, to: bill) } }
@@ -158,7 +165,12 @@ struct BillsView: View {
                 Button("Still active") { Task { await store.apply(.stillActive, to: bill) } }
                 Button("Mark cancelled") { Task { await store.apply(.markCancelled, to: bill) } }
             }
-            Button("I've paid this") { markingPaid = bill }
+            if (shown.nextExpectedDate ?? 0) > (bill.nextExpectedDate ?? 0) {
+                // The bank already shows the payment this would record.
+                Text("Your bank already shows this paid through \(shown.nextExpectedDay?.shortPhrase() ?? "its last charge")")
+            } else {
+                Button("I've paid this") { markingPaid = bill }
+            }
             if bill.source == .detected {
                 if bill.confirmedBy == .auto {
                     Button("Not a bill") { Task { await store.apply(.dismiss, to: bill) } }
@@ -167,7 +179,11 @@ struct BillsView: View {
                     Button("Mark cancelled") { Task { await store.apply(.markCancelled, to: bill) } }
                 }
                 Button("The last payment found wasn't this bill") { Task { await store.rejectLatestPayment(bill) } }
-                let manual = store.charges.filter { $0.source == .manual && $0.status == .confirmed && $0.cadence == bill.cadence }
+                // Only a bill paid from the account these charges came from can be the same bill.
+                let manual = store.charges.filter {
+                    $0.source == .manual && $0.status == .confirmed && $0.cadence == bill.cadence
+                        && $0.payingAccountId == bill.detectionAccountId
+                }
                 if !manual.isEmpty {
                     Menu("Same bill as…") {
                         ForEach(manual) { other in
@@ -192,11 +208,6 @@ struct BillsView: View {
         case .markCancelled: return "\(name) is marked cancelled and isn't counted any more."
         case .stillActive: return "\(name) is still counted."
         }
-    }
-
-    /// The row as the engine sees it: next due after any payment the bank has shown.
-    private func effective(_ charge: RecurringCharge) -> RecurringCharge {
-        store.effectiveCharges.first { $0.id == charge.id } ?? charge
     }
 
     private func account(_ id: Int64?) -> Account? {

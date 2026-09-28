@@ -64,7 +64,10 @@ enum DetectionQueries {
             let raw: Int64 = row["amount_cents"]
             let signed = reversed ? -raw : raw
             guard signed < 0, -signed >= lowCents, -signed <= highCents else { return nil }
-            return (row["id"], row["merchant_normalized"], (row["pending"] as Int? ?? 0) != 0)
+            let id: Int64 = row["id"]
+            let key: String? = row["merchant_normalized"]
+            let pending = (row["pending"] as Int? ?? 0) != 0
+            return (id: id, key: key, pending: pending)
         }
     }
 }
