@@ -44,6 +44,7 @@ final class AppDatabase: Sendable {
         "v2-recurring-anchor-destination-and-paid",
         "v3-sync-bookkeeping",
         "v4-account-type-guess",
+        "v5-recurring-detection",
     ]
 
     static var migrator: DatabaseMigrator {
@@ -94,6 +95,9 @@ final class AppDatabase: Sendable {
             try db.execute(sql: "ALTER TABLE account ADD COLUMN resumed_updating_at INTEGER")
             try db.execute(sql: "ALTER TABLE account ADD COLUMN merge_candidate_for INTEGER REFERENCES account(id) ON DELETE SET NULL")
             try db.execute(sql: "ALTER TABLE account ADD COLUMN merge_answered_at INTEGER")
+        }
+        migrator.registerMigration("v5-recurring-detection") { db in
+            try migrateV5(db)
         }
         return migrator
     }
