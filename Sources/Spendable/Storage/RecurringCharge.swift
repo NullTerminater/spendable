@@ -100,6 +100,16 @@ enum ConfirmedBy: String, Codable, Sendable, DatabaseValueConvertible {
     case auto
 }
 
+/// Fields the owner has corrected on a detected or adopted bill. Detection records its own reading
+/// in the `detected_*` columns and copies it into an effective column only while that bit is clear.
+enum OwnerOverride {
+    static let amount: Int64 = 1
+    static let cadence: Int64 = 2
+    static let account: Int64 = 4
+    static let merchant: Int64 = 8
+    static let anchor: Int64 = 16
+}
+
 /// One row of `recurring_charge`: something that charges the owner again and again.
 struct RecurringCharge: Codable, Sendable, Identifiable, Equatable, FetchableRecord, MutablePersistableRecord {
     static let databaseTableName = "recurring_charge"
@@ -136,6 +146,41 @@ struct RecurringCharge: Codable, Sendable, Identifiable, Equatable, FetchableRec
     var paidReflectedInBalance: Bool
     var createdAt: Int64
     var updatedAt: Int64
+
+    // Milestone 5 (schema v5, `docs/reviews/milestone-5-review.md`). The four effective columns
+    // above (amount, cadence, paying account, paid-through marker) keep their shipped meaning; what
+    // detection read from the bank is kept apart below, so it can never overwrite an owner's edit.
+
+    /// How the bill shows up on a statement, as the owner typed it, and its merchant key.
+    var statementMerchant: String? = nil
+    var statementMerchantKey: String? = nil
+    var currency: String = "USD"
+    /// Bumped by every write. An owner write names the revision it saw, so a form opened before a
+    /// detection or payment write reloads instead of overwriting it (decision 21).
+    var revision: Int64 = 0
+    /// Which fields the owner has corrected: `OwnerOverride` bits.
+    var ownerOverrides: Int64 = 0
+    var detectedAmountCents: Int64? = nil
+    var detectedCadence: Cadence? = nil
+    var detectedAnchorDate: Int64? = nil
+    var detectedLastSeenDay: String? = nil
+    var detectedMemberCount: Int = 0
+    var amountChangedFromCents: Int64? = nil
+    /// The account and merchant key detection found this on.
+    var detectionAccountId: Int64? = nil
+    /// Nil until an automatically confirmed bill has been seen on the Bills screen.
+    var announcedAt: Int64? = nil
+    /// The first expected charge that has been proven missing. A flag only: the bill keeps counting
+    /// until the owner marks it cancelled (decision 2).
+    var inferredInactiveSince: String? = nil
+    var inferenceCheckedThrough: String? = nil
+    /// The owner said "still active": charges expected on or before this day are not held against it.
+    var stillActiveThrough: String? = nil
+    /// The charges this was confirmed from have since been refunded, corrected or voided.
+    var evidenceChanged: Bool = false
+    /// Another of the owner's accounts receives the same amount: probably a move between accounts.
+    var transferEvidenceAccountId: Int64? = nil
+    var cancelledOn: String? = nil
 
     mutating func didInsert(_ inserted: InsertionSuccess) {
         id = inserted.rowID
@@ -246,6 +291,21 @@ extension RecurringCharge {
         let months = (target.year - anchor.year) * 12 + (target.month - anchor.month)
         let step = cadence.stepMonths ?? 1
         return months <= 0 ? 0 : months / step
+    }
+
+    /// The first anchor-derived occurrence strictly after `day`. Used to move a bill past the
+    /// latest occurrence a bank charge has paid (milestone-5-review decision 13).
+    func occurrence(after day: CalendarDay, in calendar: Calendar = .current) -> CalendarDay {
+        guard let anchor = anchorDay(in: calendar) ?? nextExpectedDay(in: calendar) else { return day }
+        var index = max(0, estimatedIndex(from: anchor, to: day, in: calendar) - 2)
+        var steps = 0
+        while steps < 1_200 {
+            steps += 1
+            let candidate = occurrence(index: index, anchor: anchor, in: calendar)
+            index += 1
+            if candidate > day { return candidate }
+        }
+        return day
     }
 
     /// This charge with its paid-through marker moved on by one step, for when the owner says they
