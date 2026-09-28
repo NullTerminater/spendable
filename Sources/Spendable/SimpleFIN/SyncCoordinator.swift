@@ -49,6 +49,9 @@ actor SyncCoordinator {
     private let client: SimpleFINClient
     private let credentials: any CredentialStore
     private let calendar: Calendar
+    /// Bill detection, drained after every transaction pull (milestone-5-review decision 6). It
+    /// spends no requests.
+    private let detection: DetectionWorker?
     private var pausedForCredentialChange = false
     private var inFlightID: UUID?
     private var inFlight: Task<SyncReport, Never>?
@@ -62,12 +65,14 @@ actor SyncCoordinator {
         database: AppDatabase,
         client: SimpleFINClient = SimpleFINClient(),
         credentials: any CredentialStore = KeychainCredentialStore(),
-        calendar: Calendar = .current
+        calendar: Calendar = .current,
+        detection: DetectionWorker? = nil
     ) {
         self.database = database
         self.client = client
         self.credentials = credentials
         self.calendar = calendar
+        self.detection = detection
     }
 
     /// Decides whether to sync at all, then does it. One run at a time.
@@ -191,6 +196,9 @@ actor SyncCoordinator {
         guard shape == .balancesAndTransactions || report.outcome.accountsInserted > 0 else { return report }
 
         await fetchTransactions(credential: credential, forceRecent: report.outcome.accountsInserted > 0, now: now, report: &report)
+        // Even after a partial pull: whatever was stored is worth reading, and nothing here asks the
+        // bank for anything.
+        if let detection { _ = await detection.drain() }
         return report
     }
 
@@ -279,7 +287,13 @@ actor SyncCoordinator {
             report.coveredBackTo = progress.coveredBackTo
             if progress.consecutiveEmptyWindows >= 2 { progress.state = .exhausted }
             if progress.nextWindowIndex >= windows.count { progress.state = .reachedLimit }
-            try? await database.writer.write { [progress] db in try progress.save(db) }
+            try? await database.writer.write { [progress] db in
+                try progress.save(db)
+                // The milestone 5 re-walk is over; a later walk for a new account is an ordinary one.
+                if progress.state != .running {
+                    try db.execute(sql: "DELETE FROM sync_state WHERE key = ?", arguments: [AppDatabase.billsRewalkKey])
+                }
+            }
             if progress.state != .running {
                 report.historyStopped = progress.state == .exhausted ? .noMoreHistory : .reachedThirteenMonths
                 return

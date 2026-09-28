@@ -79,6 +79,10 @@ struct ClassifiedAccount: Equatable, Sendable, Identifiable {
     var currency: String = "USD"
     var notUpdatingSince: Int64? = nil
     var resumedUpdatingAt: Int64? = nil
+    /// The earlier of when the bank dated the balance and when the app received it. A payment is
+    /// only in the balance if it posted before this, and a hold only in the available balance if the
+    /// app had seen it by then (milestone-5-review decisions 15 and 16).
+    var balanceArrivedInstant: Int64? = nil
 
     /// How many whole days behind today this account's balance is.
     func daysOld(today: CalendarDay, calendar: Calendar) -> Int {
@@ -98,6 +102,9 @@ enum NotSubtractedReason: Equatable, Sendable {
     case onCardPaidByTransfer(cardName: String)
     /// Money moving into an account that is already counted, so it never leaves the total.
     case movesIntoCountedAccount(accountName: String)
+    /// A charge still going through, which the bank has already taken out of the available balance
+    /// the figure uses (milestone-5-review decision 16).
+    case alreadyInAvailableBalance(accountName: String)
 }
 
 enum ObligationTreatment: Equatable, Sendable {
@@ -107,15 +114,50 @@ enum ObligationTreatment: Equatable, Sendable {
     case subtractedOnCardWithoutStatement(cardName: String)
     /// The owner says they paid it, but the balance it came out of has not been updated yet.
     case paidButStillCounted(accountName: String, markedOn: CalendarDay)
+    /// The bank shows the payment, but the balance the figure uses is not from after it posted
+    /// (milestone-5-review decision 15). Counted until that balance catches up.
+    case paymentFoundAwaitingBalance(accountName: String, postedOn: CalendarDay)
     /// Listed, explained, and not taken off the number.
     case notSubtracted(NotSubtractedReason)
 
     var comesOffTheNumber: Bool {
         switch self {
-        case .subtracted, .subtractedOnCardWithoutStatement, .paidButStillCounted: true
+        case .subtracted, .subtractedOnCardWithoutStatement, .paidButStillCounted, .paymentFoundAwaitingBalance: true
         case .notSubtracted: false
         }
     }
+
+    /// Already paid, and still counted because the balance has not caught up.
+    var isPaidButStillCounted: Bool {
+        switch self {
+        case .paidButStillCounted, .paymentFoundAwaitingBalance: true
+        default: false
+        }
+    }
+}
+
+/// A bank charge that detection linked to one occurrence of a bill.
+struct BankPayment: Equatable, Sendable {
+    let chargeId: Int64
+    /// The occurrence it pays.
+    let occurrence: CalendarDay
+    let amountCents: Int64
+    let pending: Bool
+    /// When a settled charge posted. Nil for a hold.
+    let postedInstant: Int64?
+    /// When the app first saw the row.
+    let firstSeenAt: Int64
+}
+
+/// What the bank has shown about bills being paid. Read with two bounded queries, never the
+/// transaction history (milestone-5-review decision 26).
+struct BankPayments: Equatable, Sendable {
+    /// Per bill, the latest occurrence a live settled charge has paid.
+    var latestPaid: [Int64: CalendarDay] = [:]
+    /// Live settled links that posted recently, and live holds.
+    var recent: [BankPayment] = []
+
+    static let none = BankPayments()
 }
 
 /// One dated amount the owner owes inside a window.
@@ -127,6 +169,9 @@ struct Obligation: Equatable, Sendable {
     let kind: RecurringChargeKind
     let payingAccountId: Int64?
     let treatment: ObligationTreatment
+    /// Set when the bill has stopped showing up: the day it was last charged. It still counts; the
+    /// sentence asks the owner (milestone-5-review decision 2).
+    var notSeenSince: CalendarDay? = nil
 }
 
 // MARK: - The answers
@@ -253,12 +298,14 @@ enum SafeToSpendEngine {
         charges: [RecurringCharge],
         paySchedule: PaySchedule?,
         today: CalendarDay,
-        calendar: Calendar = .current
+        calendar: Calendar = .current,
+        payments: BankPayments = .none
     ) -> SafeToSpendResult {
         guard !accounts.isEmpty else { return .noAccountsYet }
 
         let classified = accounts.map { classify($0, today: today, calendar: calendar) }
         let counted = classified.filter { $0.standing.isCounted }
+        let charges = applying(payments, to: charges, accounts: classified, calendar: calendar)
 
         // Accounts that exist but cannot be counted mean the app does not know — however little
         // those accounts contain. An empty held-out account is still an account whose money the app
@@ -288,14 +335,16 @@ enum SafeToSpendEngine {
         let monthWindow = today.startOfMonth(in: calendar)...today.endOfMonth(in: calendar)
         let month = figure(
             kind: .calendarMonth, window: monthWindow, accounts: classified, counted: counted,
-            charges: datable, today: today, calendar: calendar, payday: nil, paySchedule: paySchedule)
+            charges: datable, today: today, calendar: calendar, payday: nil, paySchedule: paySchedule,
+            payments: payments)
 
         var untilPayday: SpendableFigure?
         if let payday = paySchedule?.nextPayday(after: today, in: calendar) {
             let window = today.startOfMonth(in: calendar)...payday.adding(days: -1, in: calendar)
             untilPayday = figure(
                 kind: .untilPayday, window: window, accounts: classified, counted: counted,
-                charges: datable, today: today, calendar: calendar, payday: payday, paySchedule: paySchedule)
+                charges: datable, today: today, calendar: calendar, payday: payday, paySchedule: paySchedule,
+                payments: payments)
         }
 
         return .figures(SafeToSpendReport(
@@ -380,7 +429,68 @@ enum SafeToSpendEngine {
             isTypeConfirmed: account.userType != nil,
             currency: account.currency,
             notUpdatingSince: account.notUpdatingSince,
-            resumedUpdatingAt: account.resumedUpdatingAt)
+            resumedUpdatingAt: account.resumedUpdatingAt,
+            balanceArrivedInstant: min(account.balanceDate, account.lastSeenInSyncAt ?? account.balanceDate))
+    }
+
+    // MARK: Bank payments (milestone-5-review decisions 13, 15 and 16)
+
+    /// Moves each bill's paid-through marker past the latest occurrence a live settled charge has
+    /// paid, computed here from live links so a void or correction takes effect at once.
+    ///
+    /// Only for a bill paid from an account the figure counts. A subscription on a card with no
+    /// statement is subtracted directly because nothing else counts that card's spending; its charge
+    /// appearing on the card does not mean the money has left anything this figure adds up, so it
+    /// must not take the bill off the number. The same holds for any account that is not counted.
+    static func applying(
+        _ payments: BankPayments, to charges: [RecurringCharge], accounts: [ClassifiedAccount], calendar: Calendar
+    ) -> [RecurringCharge] {
+        guard !payments.latestPaid.isEmpty else { return charges }
+        let byId = Dictionary(uniqueKeysWithValues: accounts.map { ($0.id, $0) })
+        return charges.map { charge in
+            guard let id = charge.id, let paid = payments.latestPaid[id],
+                  let payingId = charge.payingAccountId, byId[payingId]?.standing.isCounted == true
+            else { return charge }
+            let next = charge.occurrence(after: paid, in: calendar)
+            guard let marker = charge.nextExpectedDay(in: calendar), next > marker else { return charge }
+            var moved = charge
+            moved.nextExpectedDate = next.epochSeconds(in: calendar)
+            return moved
+        }
+    }
+
+    /// Payments the bank shows that the counted balance does not include yet, still subtracted.
+    private static func paymentsAwaitingBalance(
+        for charge: RecurringCharge, payments: BankPayments, accounts: [Int64: ClassifiedAccount],
+        window: ClosedRange<CalendarDay>
+    ) -> [Obligation] {
+        guard let id = charge.id, let payingId = charge.payingAccountId, let paying = accounts[payingId],
+              paying.standing.isCounted else { return [] }
+        let arrived = paying.balanceArrivedInstant ?? paying.balanceInstant
+        let arrivedDay = CalendarDay(epochSeconds: arrived, in: CalendarDay.utc)
+        return payments.recent.compactMap { payment in
+            guard payment.chargeId == id, !payment.pending, let posted = payment.postedInstant else { return nil }
+            // Whole UTC days on both sides; the same day is ambiguous, so it stays counted.
+            let postedDay = CalendarDay(epochSeconds: posted, in: CalendarDay.utc)
+            guard arrivedDay <= postedDay, postedDay <= window.upperBound else { return nil }
+            return Obligation(
+                chargeId: id, name: charge.name, amountCents: payment.amountCents,
+                dueDay: max(postedDay, window.lowerBound), kind: charge.kind, payingAccountId: payingId,
+                treatment: .paymentFoundAwaitingBalance(accountName: paying.name, postedOn: postedDay))
+        }
+    }
+
+    /// The occurrences a hold already takes out of the available balance in use.
+    private static func occurrencesInAvailableBalance(
+        for charge: RecurringCharge, payments: BankPayments, accounts: [Int64: ClassifiedAccount]
+    ) -> Set<CalendarDay> {
+        guard let id = charge.id, let payingId = charge.payingAccountId, let paying = accounts[payingId],
+              paying.standing.isCounted, paying.usedAvailableBalance else { return [] }
+        let arrived = paying.balanceArrivedInstant ?? paying.balanceInstant
+        return Set(payments.recent.compactMap { payment in
+            guard payment.chargeId == id, payment.pending, arrived >= payment.firstSeenAt + 60 else { return nil }
+            return payment.occurrence
+        })
     }
 
     // MARK: Working out one figure
@@ -394,7 +504,8 @@ enum SafeToSpendEngine {
         today: CalendarDay,
         calendar: Calendar,
         payday: CalendarDay?,
-        paySchedule: PaySchedule?
+        paySchedule: PaySchedule?,
+        payments: BankPayments
     ) -> SpendableFigure {
         let contributed = counted.reduce(Int64(0)) { $0 + $1.contributedCents }
         let byId = Dictionary(uniqueKeysWithValues: accounts.map { ($0.id, $0) })
@@ -418,21 +529,29 @@ enum SafeToSpendEngine {
                 for: charge, accounts: byId, window: window, calendar: calendar) {
                 obligations.append(retained)
             }
+            obligations.append(contentsOf: paymentsAwaitingBalance(
+                for: charge, payments: payments, accounts: byId, window: window))
 
+            let inAvailable = occurrencesInAvailableBalance(for: charge, payments: payments, accounts: byId)
+            let notSeenSince = charge.inferredInactiveSince == nil
+                ? nil : charge.detectedLastSeenDay.flatMap(CalendarDay.init(isoString:))
             for day in charge.occurrences(in: window, calendar: calendar) {
+                var dayTreatment = treatment
+                if treatment.comesOffTheNumber, inAvailable.contains(day),
+                   let payingId = charge.payingAccountId, let paying = byId[payingId] {
+                    dayTreatment = .notSubtracted(.alreadyInAvailableBalance(accountName: paying.name))
+                }
                 obligations.append(Obligation(
                     chargeId: charge.id, name: charge.name, amountCents: charge.amountCents,
                     dueDay: day, kind: charge.kind, payingAccountId: charge.payingAccountId,
-                    treatment: treatment))
+                    treatment: dayTreatment, notSeenSince: notSeenSince))
             }
         }
 
         let subtracted = obligations.filter(\.treatment.comesOffTheNumber)
             .reduce(Int64(0)) { $0 + $1.amountCents }
-        let alreadyPaid = obligations.filter {
-            if case .paidButStillCounted = $0.treatment { return true }
-            return false
-        }.reduce(Int64(0)) { $0 + $1.amountCents }
+        let alreadyPaid = obligations.filter(\.treatment.isPaidButStillCounted)
+            .reduce(Int64(0)) { $0 + $1.amountCents }
 
         let remainder = contributed - subtracted
 

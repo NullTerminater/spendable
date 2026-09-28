@@ -13,7 +13,7 @@ enum MainScreen: String, CaseIterable, Identifiable {
         switch self {
         case .overview: "What you can spend"
         case .accounts: "Accounts"
-        case .bills: "Bills"
+        case .bills: "Bills & subscriptions"
         case .connect: "Connect your bank"
         }
     }
@@ -69,7 +69,7 @@ struct MainWindowView: View {
                     switch screen {
                     case .overview: OverviewView(store: store, state: state, connect: { screen = .connect })
                     case .accounts: AccountsView(store: store, database: database, state: state, connect: { screen = .connect })
-                    case .bills: BillsView(store: store)
+                    case .bills: BillsView(store: store, database: database)
                     case .connect: SetupConnectionView(model: model)
                     }
                 } else {

@@ -244,8 +244,8 @@ enum SafeToSpendNarrative {
 
         var lines: [String] = []
         let subtracted = figure.subtractedObligations
-        let paid = subtracted.filter { if case .paidButStillCounted = $0.treatment { return true } else { return false } }
-        let outstanding = subtracted.filter { if case .paidButStillCounted = $0.treatment { return false } else { return true } }
+        let paid = subtracted.filter(\.treatment.isPaidButStillCounted)
+        let outstanding = subtracted.filter { !$0.treatment.isPaidButStillCounted }
 
         if outstanding.isEmpty && paid.isEmpty {
             lines.append(figure.kind == .calendarMonth
@@ -287,11 +287,18 @@ enum SafeToSpendNarrative {
                 : "the \(accountName) balance I have"
             return "\(obligation.name) \(amount) — you told me you paid this on \(markedOn.shortPhrase(in: calendar)), and \(whose) still includes it."
         }
+        if case .paymentFoundAwaitingBalance(let accountName, let postedOn) = obligation.treatment {
+            return "\(obligation.name) \(amount) — payment found on \(postedOn.shortPhrase(in: calendar)). I'll stop counting it once your bank's balance for \(accountName) shows it."
+        }
         let cardNote: String
         if case .subtractedOnCardWithoutStatement(let cardName) = obligation.treatment {
             cardNote = " (charged to your \(cardName), which has no statement entered, so it's counted here)"
         } else {
             cardNote = ""
+        }
+        if let lastSeen = obligation.notSeenSince {
+            // Still counted: a bill that looks cancelled is only a question until the owner answers it.
+            return "\(obligation.name) \(amount) — hasn't charged since \(lastSeen.shortPhrase(in: calendar))\(cardNote). I'm still counting it. Mark it cancelled if you stopped paying for it."
         }
         if obligation.dueDay == today {
             return "\(obligation.name) \(amount) — due today\(cardNote)."
@@ -324,6 +331,8 @@ enum SafeToSpendNarrative {
             return "\(obligation.name) \(amount) is charged to your \(cardName) — counted through the payment you make to that card"
         case .movesIntoCountedAccount(let accountName):
             return "\(obligation.name) \(amount) moves into \(accountName), which is already counted"
+        case .alreadyInAvailableBalance(let accountName):
+            return "\(obligation.name) \(amount) is still going through, and \(accountName)'s available balance already leaves it out"
         }
     }
 
