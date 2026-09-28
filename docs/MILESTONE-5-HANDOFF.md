@@ -2,6 +2,19 @@
 
 Updated 28 September 2026. Read this first, then HANDOFF.md and the contracts below.
 
+**Update, later on 28 September.** Resume step 2 is done:
+
+- Two independent readers attacked DETECTION.md, and one of them cross-checked the other.
+- All eight areas below are adjudicated in `docs/reviews/milestone-5-review.md`: 28 decisions,
+  7 rejections, 30 test cases, and 1 open owner question ("maybe cancelled" keeps counting).
+- DETECTION.md was rewritten to match. Where the text below calls DETECTION.md an unreviewed draft,
+  or lists the eight areas as unresolved, it is historical.
+- The handoff documents are committed. The Mac working-clone paths below held no unique work and
+  can be ignored.
+- The review ran without Xcode. Nothing was built, tested or measured.
+
+Next: steps 3–5, implementing from the review. Every test and measurement runs on the owner's Mac.
+
 ## Exact state
 
 - **M1–M4 are implemented. M5 has a draft contract only.** No M5 application code, migration,

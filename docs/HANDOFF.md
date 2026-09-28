@@ -3,8 +3,10 @@
 Updated 28 September 2026 for transfer to another AI. **Read
 `docs/MILESTONE-5-HANDOFF.md` for the exact continuation state, checkouts and unresolved design
 review.** Milestone 4 is implemented and validated; the owner ran it and confirmed persistence
-after quitting/reopening, then explicitly authorized milestone 5. M5 has only an unreviewed
-`docs/DETECTION.md` draft: no implementation, migration, tests or measurements.
+after quitting/reopening, then explicitly authorized milestone 5. On 28 September `docs/DETECTION.md`
+was reviewed by two independent readers. The decisions are in `docs/reviews/milestone-5-review.md`,
+and the contract was rewritten to match. M5 has no implementation, migration, tests or
+measurements yet.
 
 Read `docs/PLAN.md` for the
 owner's decisions, `docs/CONNECTING.md` for the implemented connection contract, and
@@ -19,11 +21,11 @@ explicitly permits safe repair of rejected credentials in this milestone.
 | 2. Engine, disclosure, pay schedule, manual bills | Done, owner reviewed | `v0.2-engine` |
 | 3. SimpleFIN client, Keychain, budgeted sync | Done, owner reviewed | `v0.3-simplefin` |
 | 4. Setup, account corrections, connection repair, scheduler | Built and validated; owner ran app and confirmed persistence | `v0.4-connected` |
-| 5. Recurring-charge detection | Authorized; draft contract only, independent review unfinished | — |
+| 5. Recurring-charge detection | Authorized; contract reviewed 28 Sep, not implemented | — |
 | 6–9. Cards, menu number, widget, settings | Not started | — |
 
-Milestone 5 is authorized. Complete its contract review before implementation; do not start
-milestone 6 until the owner has seen milestone 5 run.
+Milestone 5 is authorized and its contract review is complete. Implement from the review. Do not
+start milestone 6 until the owner has seen milestone 5 run.
 
 ## What milestone 4 now contains
 
