@@ -47,6 +47,9 @@ enum SimpleFINIngest {
     static let pendingAgeOutDays = 10
     /// How far apart a hold and the charge that settles it may be.
     static let supersedeWindowDays = 10
+    /// Why a hold was written off by age. A row with this reason that the bank reports again is
+    /// brought back, because it was never really gone (milestone-5-review decision 27, B-05).
+    static let ageOutReason = "the bank stopped reporting this hold and nothing settled it"
 
     static func ingest(
         _ set: SimpleFINAccountSet,
@@ -389,7 +392,30 @@ enum SimpleFINIngest {
                  WHERE id = ?
                 """, arguments: [through, window.lowerBound.epochSeconds(in: calendar),
                                  window.lowerBound.epochSeconds(in: calendar), accountId])
+            // The same guard, the same transaction: only a span that was really fetched, for an
+            // account the server answered cleanly, is ever recorded as checked (decision 3). These
+            // are the exact instants that went on the wire.
+            try recordCoverage(
+                db, accountId: accountId, start: window.lowerBound.utcMidnight,
+                end: window.upperBound.adding(days: 1, in: CalendarDay.utc).utcMidnight, nowSeconds: nowSeconds)
         }
+    }
+
+    /// Adds a fetched span to an account's coverage, merging it with any span it overlaps or touches,
+    /// so the rows for one account never overlap and a single row answers "was all of this fetched?".
+    static func recordCoverage(_ db: Database, accountId: Int64, start: Int64, end: Int64, nowSeconds: Int64) throws {
+        guard end > start else { return }
+        let merged = try Row.fetchOne(db, sql: """
+            SELECT MIN(start_at) AS s, MAX(end_at) AS e, MIN(first_fetched_at) AS f FROM tx_coverage
+             WHERE account_id = ? AND start_at <= ? AND end_at >= ?
+            """, arguments: [accountId, end, start])
+        let mergedStart: Int64 = min(start, merged?["s"] ?? start)
+        let mergedEnd: Int64 = max(end, merged?["e"] ?? end)
+        let first: Int64 = merged?["f"] ?? nowSeconds
+        try db.execute(sql: "DELETE FROM tx_coverage WHERE account_id = ? AND start_at <= ? AND end_at >= ?",
+                       arguments: [accountId, end, start])
+        try db.execute(sql: "INSERT INTO tx_coverage (account_id, start_at, end_at, first_fetched_at, last_fetched_at) VALUES (?, ?, ?, ?, ?)",
+                       arguments: [accountId, mergedStart, mergedEnd, first, nowSeconds])
     }
 
     /// Stores one account's transactions, and reconciles what was pending.
@@ -427,18 +453,27 @@ enum SimpleFINIngest {
                 continue
             }
             let effective = effectiveDate(row, nowSeconds: nowSeconds)
+            // Every row gets its merchant key as it is written, whatever its sign or state: refunds
+            // and holds are compared against bills too (decision 7).
+            let merchant = MerchantKey.normalize(payee: row.payee, description: row.description)
 
-            // The fast path: the id the app already knows.
+            // The fast path: the id the app already knows. A hold written off by age that the bank
+            // reports again was never gone, so it comes back (B-05); any other void stands.
             if let existingId = try Int64.fetchOne(
                 db, sql: "SELECT id FROM bank_transaction WHERE account_id = ? AND external_id = ?",
                 arguments: [accountId, row.id]) {
                 try db.execute(sql: """
                     UPDATE bank_transaction
                        SET posted = ?, transacted_at = ?, effective_date = ?, amount_cents = ?,
-                           description = ?, payee = ?, memo = ?, mcc = ?, pending = ?, last_seen_at = ?
+                           description = ?, payee = ?, memo = ?, mcc = ?, pending = ?, last_seen_at = ?,
+                           merchant_normalized = ?, merchant_alt = ?, normalizer_version = ?,
+                           voided_at = CASE WHEN voided_reason = ? THEN NULL ELSE voided_at END,
+                           voided_reason = CASE WHEN voided_reason = ? THEN NULL ELSE voided_reason END
                      WHERE id = ?
                     """, arguments: [row.posted, row.transactedAt, effective, amount, row.description,
-                                     row.payee, row.memo, row.mcc, row.isPending, nowSeconds, existingId])
+                                     row.payee, row.memo, row.mcc, row.isPending, nowSeconds,
+                                     merchant.key, merchant.alternate, MerchantKey.version,
+                                     ageOutReason, ageOutReason, existingId])
                 continue
             }
             unknown[Signature(amount: amount, effective: effective, description: row.description),
@@ -469,26 +504,32 @@ enum SimpleFINIngest {
                 if !free.isEmpty {
                     let adopted = free.removeFirst()
                     let adoptedId: Int64 = adopted["id"] ?? 0
+                    let merchant = MerchantKey.normalize(payee: candidate.row.payee, description: candidate.row.description)
                     try db.execute(sql: """
                         UPDATE bank_transaction
                            SET external_id = ?, posted = ?, transacted_at = ?, payee = ?, memo = ?,
-                               mcc = ?, pending = ?, last_seen_at = ?
+                               mcc = ?, pending = ?, last_seen_at = ?,
+                               merchant_normalized = ?, merchant_alt = ?, normalizer_version = ?
                          WHERE id = ?
                         """, arguments: [candidate.row.id, candidate.row.posted, candidate.row.transactedAt,
                                          candidate.row.payee, candidate.row.memo, candidate.row.mcc,
-                                         candidate.row.isPending, nowSeconds, adoptedId])
+                                         candidate.row.isPending, nowSeconds,
+                                         merchant.key, merchant.alternate, MerchantKey.version, adoptedId])
                     outcome.transactionsMatchedByContent += 1
                     continue
                 }
+                let merchant = MerchantKey.normalize(payee: candidate.row.payee, description: candidate.row.description)
                 try db.execute(sql: """
                     INSERT INTO bank_transaction
                         (account_id, external_id, posted, transacted_at, effective_date, amount_cents,
-                         description, payee, memo, mcc, pending, first_seen_at, last_seen_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         description, payee, memo, mcc, pending, first_seen_at, last_seen_at,
+                         merchant_normalized, merchant_alt, normalizer_version)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, arguments: [accountId, candidate.row.id, candidate.row.posted,
                                      candidate.row.transactedAt, candidate.effective, candidate.amount,
                                      candidate.row.description, candidate.row.payee, candidate.row.memo,
-                                     candidate.row.mcc, candidate.row.isPending, nowSeconds, nowSeconds])
+                                     candidate.row.mcc, candidate.row.isPending, nowSeconds, nowSeconds,
+                                     merchant.key, merchant.alternate, MerchantKey.version])
                 outcome.transactionsInserted += 1
             }
         }
@@ -514,11 +555,17 @@ enum SimpleFINIngest {
             """, arguments: [accountId])
         guard !pending.isEmpty else { return }
 
+        // Only settled rows that could match one of these holds: never the account's whole history
+        // (B-22). The account/day index answers the range.
+        let windowSpan = Int64(supersedeWindowDays) * 86_400
+        let earliest = (pending.compactMap { $0["effective_date"] as Int64? }.min() ?? 0) - windowSpan
+        let latest = (pending.compactMap { $0["effective_date"] as Int64? }.max() ?? 0) + windowSpan
         let settled = try Row.fetchAll(db, sql: """
             SELECT id, amount_cents, effective_date, description FROM bank_transaction
-             WHERE account_id = ? AND pending = 0 AND voided_at IS NULL AND superseded_by IS NULL
+             WHERE account_id = ? AND effective_date BETWEEN ? AND ?
+               AND pending = 0 AND voided_at IS NULL AND superseded_by IS NULL
              ORDER BY effective_date ASC, id ASC
-            """, arguments: [accountId])
+            """, arguments: [accountId, earliest, latest])
 
         var claimedSettled: Set<Int64> = []
         var claimedPending: Set<Int64> = []
@@ -561,10 +608,10 @@ enum SimpleFINIngest {
         if voided > 0 {
             try db.execute(sql: """
                 UPDATE bank_transaction
-                   SET voided_at = ?, voided_reason = 'the bank stopped reporting this hold and nothing settled it'
+                   SET voided_at = ?, voided_reason = ?
                  WHERE account_id = ? AND pending = 1 AND voided_at IS NULL AND superseded_by IS NULL
                    AND effective_date < ? AND last_seen_at < ?
-                """, arguments: [nowSeconds, accountId, ageOut, nowSeconds])
+                """, arguments: [nowSeconds, ageOutReason, accountId, ageOut, nowSeconds])
             outcome.pendingVoided += voided
         }
     }
