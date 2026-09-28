@@ -13,7 +13,10 @@ Updated 28 September 2026. Read this first, then HANDOFF.md and the contracts be
   can be ignored.
 - The review ran without Xcode. Nothing was built, tested or measured.
 
-Next: steps 3–5, implementing from the review. Every test and measurement runs on the owner's Mac.
+**Update, end of 28 September.** Step 3 was done without a compiler: 11 commits on branch
+`main-sii1hq`, ending with the code-review fixes. The implementation addendum in the review lists
+the known gaps. Steps 4–5 (build, test, synthetic acceptance, measurements, tag) remain, and all of
+them run on the owner's Mac. HANDOFF.md says exactly what to run.
 
 ## Exact state
 

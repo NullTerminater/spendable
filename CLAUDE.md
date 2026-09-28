@@ -48,7 +48,7 @@ xcodebuild -project Spendable.xcodeproj -scheme Spendable -destination 'platform
   - `docs/SYNC.md` — the SimpleFIN client and sync contract (milestone 3, shipped).
   - `docs/CONNECTING.md` — the milestone 4 implementation contract, including owner-approved rejected-credential repair (PLAN rule 13). Otherwise: **where it and `docs/reviews/milestone-4-review.md` disagree, the review wins.** Never implement a rule from it without checking the review first.
   - `docs/reviews/milestone-4-review.md` — the authority for the rest of milestone 4: 27 decisions, 8 findings rejected, 25 test cases, kept verbatim. Read it before writing any more milestone 4 code.
-  - `docs/DETECTION.md` — the milestone 5 contract (recurring-charge detection), rewritten after its review. Not implemented yet.
+  - `docs/DETECTION.md` — the milestone 5 contract (recurring-charge detection), rewritten after its review. Implemented on 28 September without a compiler; not yet built or tested.
   - `docs/reviews/milestone-5-review.md` — the authority for milestone 5: 28 decisions, 7 findings rejected, 30 test cases and one open owner question. It wins over DETECTION.md and PLAN's milestone 5 text. Read it before writing any milestone 5 code.
   - `docs/reviews/milestone-2-review.md` and `docs/reviews/milestone-3-review.md` — why several shipped rules look odd.
   - `README.md` — how to build, how to verify each milestone, and the measured numbers.
