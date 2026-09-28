@@ -29,13 +29,13 @@ enum DetectionPass {
             INSERT INTO detection_dirty (account_id, merchant_key, enqueued_at)
             SELECT DISTINCT account_id, merchant_normalized, ? FROM bank_transaction
              WHERE account_id = ? AND merchant_normalized IS NOT NULL
-            ON CONFLICT (account_id, merchant_key) DO NOTHING
+            ON CONFLICT (account_id, merchant_key) DO UPDATE SET attempts = 0, failed_at = NULL
             """, arguments: [context.nowSeconds, accountId])
         try db.execute(sql: """
             INSERT INTO detection_dirty (account_id, merchant_key, enqueued_at)
             SELECT DISTINCT detection_account_id, merchant_normalized, ? FROM recurring_charge
              WHERE detection_account_id = ? AND merchant_normalized IS NOT NULL
-            ON CONFLICT (account_id, merchant_key) DO NOTHING
+            ON CONFLICT (account_id, merchant_key) DO UPDATE SET attempts = 0, failed_at = NULL
             """, arguments: [context.nowSeconds, accountId])
     }
 
@@ -104,7 +104,7 @@ enum DetectionPass {
 
         for id in state.touchedSeries.union(state.seriesOnKey.keys) {
             guard let charge = try RecurringCharge.fetchOne(db, key: id) else { continue }
-            try updateEvidenceHealth(charge, db: db, context: context)
+            try updateEvidenceHealth(charge, continuedThisPass: state.touchedSeries.contains(id), db: db)
             if charge.source == .detected {
                 try updateTransferEvidence(charge, account: account, db: db, reversed: reversed)
             }
@@ -131,6 +131,8 @@ enum DetectionPass {
         var existingLinks: [Int64: Link] = [:]
         /// Detector links on series of this key whose rows are no longer live or no longer here.
         var staleLinks: Set<Int64> = []
+        /// Payment links on rows read this pass, kept unless a track decides them differently.
+        var keptPayments: Set<Int64> = []
         var rejections: Set<[Int64]> = []
         var desired: [Int64: Link] = [:]
         var claimed: Set<Int64> = []
@@ -187,8 +189,12 @@ enum DetectionPass {
                     let txnAccount: Int64? = row["txn_account"]
                     if !live || txnKey != key || txnAccount != accountId { state.staleLinks.insert(transactionId) }
                 }
-                // Rows read this pass are decided afresh, unless the owner linked them.
-                if rowSet.contains(transactionId), link.linkedBy == "detector" { state.staleLinks.insert(transactionId) }
+                // Evidence on rows read this pass is decided afresh. A payment link is only replaced
+                // by a different decision, never dropped because a track briefly failed to form:
+                // that would show bills the bank has shown paid as owed again.
+                if rowSet.contains(transactionId), link.linkedBy == "detector" {
+                    if link.role == "evidence" { state.staleLinks.insert(transactionId) } else { state.keptPayments.insert(transactionId) }
+                }
             }
             return state
         }
@@ -207,7 +213,9 @@ enum DetectionPass {
             return link.chargeId
         })
         if linked.count > 1 { return }
-        var chargeId: Int64? = linked.first
+        // A bill another track already continued in this pass is not this track's to continue:
+        // two plans that once looked like one biweekly bill must end up as two bills.
+        var chargeId: Int64? = linked.first.flatMap { state.claimed.contains($0) ? nil : $0 }
         var cappedByLineage = false
 
         // 2. A lineage continuation: the one bill on this key and cadence that ended just before.
@@ -288,14 +296,14 @@ enum DetectionPass {
         let matches: [Int64] = rows.compactMap { row in
             let low: Int64 = row["band_low_cents"]
             let high: Int64 = row["band_high_cents"]
+            let id: Int64 = row["charge_id"]
             guard 100 * amount >= 95 * low, 100 * amount <= 105 * high else { return nil }
             // Running at the same time as the suppressed bill's own charges proves it is another one.
             if let lastText: String = row["detected_last_seen_day"], let last = CalendarDay(isoString: lastText),
                let first = track.memberDays.first, first <= last,
-               !track.memberIds.contains(where: { state.existingLinks[$0]?.chargeId == row["charge_id"] }) {
+               !track.memberIds.contains(where: { state.existingLinks[$0]?.chargeId == id }) {
                 return nil
             }
-            let id: Int64 = row["charge_id"]
             return state.claimed.contains(id) ? nil : id
         }
         return matches.count == 1 ? matches[0] : nil
@@ -452,8 +460,19 @@ enum DetectionPass {
     /// an unchanged link is not rewritten.
     private static func writeLinks(state: KeyState, db: Database, context: Context) throws {
         var removals: [Int64] = []
-        for id in state.staleLinks where state.desired[id] != state.existingLinks[id] { removals.append(id) }
+        // A payment link on a row read this pass survives unless its own bill was formed again this
+        // pass without that row: then it is genuinely stale. If its bill formed no track at all, it
+        // stays, so a merchant whose history briefly stops forming a series does not show bills the
+        // bank has shown paid as owed again.
+        var stale = state.staleLinks
+        for id in state.keptPayments {
+            guard let existing = state.existingLinks[id], state.touchedSeries.contains(existing.chargeId),
+                  state.desired[id] != existing else { continue }
+            stale.insert(id)
+        }
+        for id in stale where state.desired[id] != state.existingLinks[id] { removals.append(id) }
         for (id, link) in state.desired where state.existingLinks[id] != nil && state.existingLinks[id] != link {
+            if state.keptPayments.contains(id), !stale.contains(id) { continue }
             if !removals.contains(id) { removals.append(id) }
         }
         for id in removals {
@@ -488,14 +507,12 @@ enum DetectionPass {
 
     /// A confirmed bill whose supporting charges have since shrunk below three keeps counting, and
     /// asks the owner to check it (decision 12).
-    private static func updateEvidenceHealth(_ charge: RecurringCharge, db: Database, context: Context) throws {
+    private static func updateEvidenceHealth(_ charge: RecurringCharge, continuedThisPass: Bool, db: Database) throws {
         guard let id = charge.id, charge.source == .detected else { return }
-        let live = try Int.fetchOne(db, sql: """
-            SELECT COUNT(*) FROM recurring_occurrence o JOIN bank_transaction t ON t.id = o.transaction_id
-             WHERE o.recurring_charge_id = ? AND o.role IN ('evidence', 'payment')
-               AND t.voided_at IS NULL AND t.superseded_by IS NULL
-            """, arguments: [id]) ?? 0
-        let changed = charge.status == .confirmed && charge.confirmedBy == .auto && live < 3
+        // Fewer than three charges now support it, or none of this merchant's history forms it any
+        // more: it keeps counting and asks to be checked.
+        let supported = continuedThisPass && charge.detectedMemberCount >= 3
+        let changed = charge.status == .confirmed && charge.confirmedBy == .auto && !supported
         guard changed != charge.evidenceChanged else { return }
         try db.execute(sql: "UPDATE recurring_charge SET evidence_changed = ?, revision = revision + 1 WHERE id = ?",
                        arguments: [changed, id])

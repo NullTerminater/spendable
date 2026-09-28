@@ -129,7 +129,10 @@ enum BillsQueries {
            nowSeconds - Int64(balances.timeIntervalSince1970) < 86_400 {
             notices.noNewTransactionsSince = CalendarDay(epochSeconds: newest)
         }
-        notices.denseMerchants = try String.fetchAll(db, sql: "SELECT value FROM sync_state WHERE key LIKE 'detection-dense:%' ORDER BY value")
+        notices.denseMerchants = try String.fetchAll(db, sql: """
+            SELECT DISTINCT s.value FROM sync_state s JOIN account a ON s.key LIKE 'detection-dense:' || a.id || ':%'
+             WHERE a.archived_at IS NULL ORDER BY s.value
+            """)
         return notices
     }
 }

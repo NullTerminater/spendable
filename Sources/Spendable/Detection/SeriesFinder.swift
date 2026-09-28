@@ -234,7 +234,7 @@ enum SeriesFinder {
     }
 
     static func fits(_ gaps: [Int], _ cadence: Cadence, allowSkip: Bool) -> Bool {
-        let window = window(cadence)
+        let window = Self.window(cadence)
         var adjusted: [Int] = []
         var fitting = 0
         var skipUsed = false
@@ -346,7 +346,7 @@ enum SeriesFinder {
 
     /// The occurrence a charge on `day` pays, if it lands within tolerance of exactly one.
     static func occurrencePaid(by day: CalendarDay, anchor: CalendarDay, cadence: Cadence) -> CalendarDay? {
-        let tolerance = tolerance(cadence)
+        let tolerance = Self.tolerance(cadence)
         // Estimate the index, then look at its neighbours.
         let estimate: Int
         if let step = cadence.stepDays {

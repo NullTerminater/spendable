@@ -154,8 +154,9 @@ struct DetectionSchemaTests {
     func queryPlanUsesDetectionIndex() throws {
         let db = try AppDatabase.inMemory()
         let plan = try db.reader.read { db in
-            try String.fetchAll(db, sql: "EXPLAIN QUERY PLAN " + DetectionQueries.countForKey,
-                                arguments: [1, "K", 0]).joined(separator: "\n")
+            // EXPLAIN QUERY PLAN answers id, parent, notused, detail: the plan is in `detail`.
+            try Row.fetchAll(db, sql: "EXPLAIN QUERY PLAN " + DetectionQueries.countForKey, arguments: [1, "K", 0])
+                .map { $0["detail"] as String }.joined(separator: "\n")
         }
         #expect(plan.contains("bank_transaction_detect"))
         #expect(!plan.contains("bank_transaction_merchant"))
@@ -164,8 +165,8 @@ struct DetectionSchemaTests {
     @Test("SQL monthly cents equal Swift's for every cadence")
     func monthlyCentsParity() throws {
         let db = try AppDatabase.inMemory()
-        var generator = SystemRandomNumberGenerator()
         try db.writer.write { db in
+            var generator = SystemRandomNumberGenerator()
             try db.execute(sql: """
                 INSERT INTO recurring_charge (source, kind, name, amount_cents, cadence, status, created_at, updated_at)
                 VALUES ('manual', 'bill', 'Probe', 1, 'monthly', 'suggested', 0, 0)

@@ -377,34 +377,57 @@ final class SpendableStore {
 
     /// The owner says a detected bill and a bill they typed in are the same one. The typed one is
     /// kept, with its name, amount and paid-through date; the detected one's bank charges move to it
-    /// and the detected one is dismissed, in one transaction (decision 20).
-    func sameBill(detected: RecurringCharge, manual: RecurringCharge, now: Date = .now) async {
+    /// as the owner's own links and the detected one is dismissed, in one transaction (decision 20).
+    ///
+    /// Only for a typed bill paid from the account the charges came from, and its statement merchant
+    /// becomes the detected one's key: otherwise the next detection pass would not find the typed
+    /// bill, would take the charges back and would create the detected bill again.
+    @discardableResult
+    func sameBill(detected: RecurringCharge, manual: RecurringCharge, now: Date = .now) async -> BillWriteResult {
         guard let detectedId = detected.id, let manualId = manual.id, detected.source == .detected,
-              manual.source == .manual else { return }
+              manual.source == .manual, let account = detected.detectionAccountId,
+              manual.payingAccountId == account, let key = detected.merchantNormalized else { return .gone }
         let seconds = Int64(now.timeIntervalSince1970)
-        await write { db in
-            try db.execute(sql: "UPDATE recurring_occurrence SET recurring_charge_id = ? WHERE recurring_charge_id = ?",
-                           arguments: [manualId, detectedId])
-            try db.execute(sql: """
-                UPDATE recurring_charge
-                   SET statement_merchant = COALESCE(statement_merchant, ?),
-                       statement_merchant_key = COALESCE(statement_merchant_key, ?),
-                       revision = revision + 1, updated_at = ? WHERE id = ?
-                """, arguments: [detected.name, detected.merchantNormalized, seconds, manualId])
-            try db.execute(sql: """
-                UPDATE recurring_charge SET status = 'dismissed', announced_at = COALESCE(announced_at, ?),
-                       revision = revision + 1, updated_at = ? WHERE id = ?
-                """, arguments: [seconds, seconds, detectedId])
-            if let account = detected.detectionAccountId, let key = detected.merchantNormalized {
-                let price = detected.detectedAmountCents ?? detected.amountCents
+        do {
+            let outcome = try await database.writer.write { db -> BillWriteResult in
+                guard let currentDetected = try RecurringCharge.fetchOne(db, key: detectedId),
+                      let currentManual = try RecurringCharge.fetchOne(db, key: manualId) else { return .gone }
+                guard currentDetected.revision == detected.revision, currentManual.revision == manual.revision,
+                      currentManual.payingAccountId == account else { return .changedSinceOpened }
+                // An occurrence the typed bill already has a payment for keeps that one; the moved
+                // charge becomes evidence instead of colliding with it.
+                try db.execute(sql: """
+                    UPDATE OR IGNORE recurring_occurrence SET recurring_charge_id = ?, linked_by = 'owner'
+                     WHERE recurring_charge_id = ?
+                    """, arguments: [manualId, detectedId])
+                try db.execute(sql: """
+                    UPDATE recurring_occurrence SET recurring_charge_id = ?, linked_by = 'owner', role = 'evidence', occurrence_day = NULL
+                     WHERE recurring_charge_id = ?
+                    """, arguments: [manualId, detectedId])
+                try db.execute(sql: """
+                    UPDATE recurring_charge
+                       SET statement_merchant = COALESCE(statement_merchant, ?), statement_merchant_key = ?,
+                           revision = revision + 1, updated_at = ? WHERE id = ?
+                    """, arguments: [detected.name, key, seconds, manualId])
+                try db.execute(sql: """
+                    UPDATE recurring_charge SET status = 'dismissed', announced_at = COALESCE(announced_at, ?),
+                           revision = revision + 1, updated_at = ? WHERE id = ?
+                    """, arguments: [seconds, seconds, detectedId])
+                let price = currentDetected.detectedAmountCents ?? currentDetected.amountCents
                 try db.execute(sql: """
                     INSERT INTO detection_suppression
                         (account_id, merchant_key, cadence, band_low_cents, band_high_cents, charge_id, kind, created_at)
                     VALUES (?, ?, ?, ?, ?, ?, 'dismissed', ?)
-                    """, arguments: [account, key, detected.cadence.rawValue, price, price, detectedId, seconds])
+                    """, arguments: [account, key, currentDetected.cadence.rawValue, price, price, detectedId, seconds])
+                return .saved
             }
+            report(outcome)
+            if outcome == .saved { detectionRequested?() }
+            return outcome
+        } catch {
+            saveFailed()
+            return .failed
         }
-        detectionRequested?()
     }
 
     /// "That wasn't this bill": the latest bank charge matched to it stops counting as its payment,
@@ -644,13 +667,16 @@ struct BillUndo: Equatable, Sendable {
 
 /// The two bounded reads behind `BankPayments` (milestone-5-review decision 26). Neither reads
 /// transaction history: one aggregates the payment links, the other reads links whose charge
-/// posted in the last few days or is still a hold.
+/// posted in the last few days or is still a hold. Only a charge that posted on the bill's own
+/// paying account counts: the engine compares it with that account's balance, and a bill the owner
+/// has pointed at another account cannot be paid off by money leaving a different one.
 enum BankPaymentQueries {
     static func load(_ db: Database, oldestBalanceInstant: Int64?) throws -> BankPayments {
         var payments = BankPayments()
         for row in try Row.fetchAll(db, sql: """
             SELECT o.recurring_charge_id, MAX(o.occurrence_day) AS paid
               FROM recurring_occurrence o JOIN bank_transaction t ON t.id = o.transaction_id
+              JOIN recurring_charge c ON c.id = o.recurring_charge_id AND c.paying_account_id = t.account_id
              WHERE o.role = 'payment' AND t.pending = 0 AND t.voided_at IS NULL AND t.superseded_by IS NULL
                AND ABS(t.amount_cents) = o.linked_amount_cents
              GROUP BY o.recurring_charge_id
@@ -662,6 +688,7 @@ enum BankPaymentQueries {
         for row in try Row.fetchAll(db, sql: """
             SELECT o.recurring_charge_id, o.occurrence_day, o.linked_amount_cents, t.pending, t.posted, t.first_seen_at
               FROM recurring_occurrence o JOIN bank_transaction t ON t.id = o.transaction_id
+              JOIN recurring_charge c ON c.id = o.recurring_charge_id AND c.paying_account_id = t.account_id
              WHERE t.voided_at IS NULL AND t.superseded_by IS NULL AND ABS(t.amount_cents) = o.linked_amount_cents
                AND ((o.role = 'pending_payment' AND t.pending = 1)
                  OR (o.role = 'payment' AND t.pending = 0 AND t.effective_date >= ?))
